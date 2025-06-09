@@ -1,0 +1,46 @@
+{
+    "model": {
+        "text": {
+            "model_name": "bert-base-uncased",
+            "pretrained": true
+        },
+        "image": {
+            "model_name": "vit_base_patch16_224",
+            "pretrained": true
+        },
+        "audio": {
+            "pretrained": true
+        },
+        "video": {},
+        "fusion": {
+            "hidden_size": 768,
+            "num_layers": 2,
+            "num_heads": 12,
+            "mlp_dim": 3072,
+            "dropout_rate": 0.1
+        },
+        "heads": {
+            "input_dim": 768,
+            "hidden_dim": 768,
+            "output_dim": 512
+        }
+    },
+    "dataset": {
+        "name": "webimagetext",
+        "data_dir": "/path/to/your/dataset",
+        "modalities": ["text", "image"],
+        "eval_split": "validation",
+        "shuffle_buffer_size": 10000
+    },
+    "training": {
+        "batch_size": 128,
+        "eval_batch_size": 128,
+        "learning_rate": 1e-4,
+        "weight_decay": 0.01,
+        "warmup_steps": 1000,
+        "gradient_clipping": 1.0,
+        "fp16": true,
+        "zero_stage": 2,
+        "num_workers": 4
+    }
+} 

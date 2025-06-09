@@ -1,0 +1,4142 @@
+# MultiModal Representation Learning Framework (MMRL)
+
+A state-of-the-art multimodal embedding framework that combines text, image, audio, and video representations using advanced transformer architectures and contrastive learning.
+
+## Architecture Overview
+
+MMRL uses a modular design with specialized encoders for each modality, followed by cross-attention fusion mechanisms that create unified representations. The framework supports both contrastive and generative learning objectives.
+
+```
+                  ┌─────────────┐
+                  │  Text Data  │
+                  └──────┬──────┘
+                         │
+                         ▼
+                  ┌─────────────┐
+                  │ Text Encoder│
+                  └──────┬──────┘
+                         │
+                         ▼
+┌─────────────┐   ┌─────────────┐   ┌─────────────┐
+│ Image Data  │   │ Multimodal  │   │ Audio Data  │
+└──────┬──────┘   │   Fusion    │   └──────┬──────┘
+       │          │ (X-Attention)│          │
+       ▼          └──────┬──────┘          ▼
+┌─────────────┐          │          ┌─────────────┐
+│Image Encoder│◄─────────┼─────────►│Audio Encoder│
+└──────┬──────┘          │          └──────┬──────┘
+       │                 │                 │
+       └─────────┬───────┴────────┬────────┘
+                 │                │
+                 ▼                ▼
+         ┌───────────────┐ ┌───────────────┐
+         │  Contrastive  │ │   Generative  │
+         │   Learning    │ │   Learning    │
+         └───────┬───────┘ └───────┬───────┘
+                 │                 │
+                 └────────┬────────┘
+                          │
+                          ▼
+                  ┌───────────────┐
+                  │  Multimodal   │
+                  │  Embeddings   │
+                  └───────────────┘
+```
+
+## Project Structure
+
+```
+mmrl/
+├── configs/                 # Configuration files for models and training
+├── data/
+│   ├── loaders/            # Dataset loaders for different modalities
+│   ├── preprocessing/      # Preprocessing pipelines
+│   └── tfdata/             # TensorFlow Data pipelines
+├── evaluation/
+│   ├── metrics/            # Evaluation metrics implementations
+│   ├── tasks/              # Downstream task evaluators
+│   └── zero_shot/          # Zero-shot evaluation utilities
+├── modeling/
+│   ├── encoders/           # Modality-specific encoders
+│   ├── fusion/             # Cross-attention fusion modules
+│   ├── heads/              # Task-specific heads
+│   └── losses/             # Contrastive and generative losses
+├── training/
+│   ├── distributed/        # Distributed training utilities
+│   ├── optimizers/         # Custom optimizers
+│   └── schedulers/         # Learning rate schedulers
+├── utils/
+│   ├── logging/            # Logging utilities
+│   ├── visualization/      # Embedding and attention visualization
+│   └── profiling/          # Performance profiling tools
+├── scripts/                # Training and evaluation scripts
+└── tests/                  # Unit and integration tests
+```
+
+## Implementation
+
+### 1. Core Model Architecture
+
+```python
+# mmrl/modeling/model.py
+
+import functools
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import flax.linen as nn
+import jax
+import jax.numpy as jnp
+import torch
+import torch.nn as nn as torch_nn
+
+from mmrl.modeling.encoders import (
+    TextEncoder, 
+    ImageEncoder, 
+    AudioEncoder, 
+    VideoEncoder
+)
+from mmrl.modeling.fusion import CrossAttentionFusion
+from mmrl.modeling.heads import ContrastiveHead, GenerativeHead
+
+
+class MultiModalModel(nn.Module):
+    """
+    Core multimodal transformer model implementing cross-modal fusion.
+    
+    Extends recent approaches like CLIP, Flamingo, and PaLI-X with improved
+    cross-attention mechanisms for modality fusion.
+    """
+    config: Dict[str, Any]
+    dtype: jnp.dtype = jnp.float32
+    
+    def setup(self):
+        # Initialize modality-specific encoders
+        self.text_encoder = TextEncoder(
+            vocab_size=self.config["text"]["vocab_size"],
+            hidden_size=self.config["text"]["hidden_size"],
+            num_layers=self.config["text"]["num_layers"],
+            num_heads=self.config["text"]["num_heads"],
+            mlp_dim=self.config["text"]["mlp_dim"],
+            dropout_rate=self.config["text"]["dropout_rate"],
+            dtype=self.dtype,
+        )
+        
+        self.image_encoder = ImageEncoder(
+            patch_size=self.config["image"]["patch_size"],
+            hidden_size=self.config["image"]["hidden_size"],
+            num_layers=self.config["image"]["num_layers"],
+            num_heads=self.config["image"]["num_heads"],
+            mlp_dim=self.config["image"]["mlp_dim"],
+            dropout_rate=self.config["image"]["dropout_rate"],
+            dtype=self.dtype,
+        )
+        
+        self.audio_encoder = AudioEncoder(
+            patch_size=self.config["audio"]["patch_size"],
+            hidden_size=self.config["audio"]["hidden_size"],
+            num_layers=self.config["audio"]["num_layers"],
+            num_heads=self.config["audio"]["num_heads"],
+            mlp_dim=self.config["audio"]["mlp_dim"],
+            dropout_rate=self.config["audio"]["dropout_rate"],
+            dtype=self.dtype,
+        )
+        
+        self.video_encoder = VideoEncoder(
+            patch_size=self.config["video"]["patch_size"],
+            frame_stride=self.config["video"]["frame_stride"],
+            hidden_size=self.config["video"]["hidden_size"],
+            num_layers=self.config["video"]["num_layers"],
+            num_heads=self.config["video"]["num_heads"],
+            mlp_dim=self.config["video"]["mlp_dim"],
+            dropout_rate=self.config["video"]["dropout_rate"],
+            dtype=self.dtype,
+        )
+        
+        # Cross-attention fusion module
+        self.fusion = CrossAttentionFusion(
+            hidden_size=self.config["fusion"]["hidden_size"],
+            num_layers=self.config["fusion"]["num_layers"],
+            num_heads=self.config["fusion"]["num_heads"],
+            mlp_dim=self.config["fusion"]["mlp_dim"],
+            dropout_rate=self.config["fusion"]["dropout_rate"],
+            dtype=self.dtype,
+        )
+        
+        # Task-specific heads
+        self.contrastive_head = ContrastiveHead(
+            hidden_size=self.config["heads"]["hidden_size"],
+            projection_dim=self.config["heads"]["projection_dim"],
+            temperature=self.config["heads"]["temperature"],
+            dtype=self.dtype,
+        )
+        
+        self.generative_head = GenerativeHead(
+            hidden_size=self.config["heads"]["hidden_size"],
+            vocab_size=self.config["text"]["vocab_size"],
+            dtype=self.dtype,
+        )
+    
+    def get_modality_encodings(
+        self,
+        text=None,
+        images=None,
+        audio=None,
+        video=None,
+        training: bool = False,
+    ) -> Dict[str, jnp.ndarray]:
+        """Encode each provided modality."""
+        encodings = {}
+        attention_masks = {}
+        
+        if text is not None:
+            text_embeddings, text_mask = self.text_encoder(
+                text["input_ids"], 
+                text["attention_mask"],
+                deterministic=not training,
+            )
+            encodings["text"] = text_embeddings
+            attention_masks["text"] = text_mask
+        
+        if images is not None:
+            image_embeddings, image_mask = self.image_encoder(
+                images["pixel_values"],
+                deterministic=not training,
+            )
+            encodings["image"] = image_embeddings
+            attention_masks["image"] = image_mask
+        
+        if audio is not None:
+            audio_embeddings, audio_mask = self.audio_encoder(
+                audio["features"],
+                deterministic=not training,
+            )
+            encodings["audio"] = audio_embeddings
+            attention_masks["audio"] = audio_mask
+        
+        if video is not None:
+            video_embeddings, video_mask = self.video_encoder(
+                video["frames"],
+                deterministic=not training,
+            )
+            encodings["video"] = video_embeddings
+            attention_masks["video"] = video_mask
+        
+        return encodings, attention_masks
+    
+    def __call__(
+        self,
+        text=None,
+        images=None,
+        audio=None,
+        video=None,
+        training: bool = False,
+    ) -> Dict[str, jnp.ndarray]:
+        # Get individual modality encodings
+        encodings, attention_masks = self.get_modality_encodings(
+            text=text,
+            images=images,
+            audio=audio,
+            video=video,
+            training=training,
+        )
+        
+        # Fuse modalities using cross-attention
+        fused_embeddings, attention_weights = self.fusion(
+            encodings, 
+            attention_masks,
+            deterministic=not training,
+        )
+        
+        # Get embeddings for contrastive learning
+        contrastive_embeddings = self.contrastive_head(fused_embeddings)
+        
+        # Get logits for generative tasks (if needed)
+        generative_logits = None
+        if training or self.config.get("always_generate", False):
+            generative_logits = self.generative_head(fused_embeddings)
+        
+        return {
+            "fused_embeddings": fused_embeddings,
+            "contrastive_embeddings": contrastive_embeddings,
+            "generative_logits": generative_logits,
+            "attention_weights": attention_weights,
+            "modality_encodings": encodings,
+        }
+
+
+class MultiModalModelPyTorch(torch_nn.Module):
+    """PyTorch implementation of the multimodal model for training with DeepSpeed/FSDP."""
+    
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        
+        # Initialize modality-specific encoders
+        from mmrl.modeling.encoders.pytorch import (
+            TextEncoderPyTorch,
+            ImageEncoderPyTorch,
+            AudioEncoderPyTorch,
+            VideoEncoderPyTorch,
+        )
+        from mmrl.modeling.fusion.pytorch import CrossAttentionFusionPyTorch
+        from mmrl.modeling.heads.pytorch import (
+            ContrastiveHeadPyTorch,
+            GenerativeHeadPyTorch,
+        )
+        
+        self.text_encoder = TextEncoderPyTorch(
+            vocab_size=self.config["text"]["vocab_size"],
+            hidden_size=self.config["text"]["hidden_size"],
+            num_layers=self.config["text"]["num_layers"],
+            num_heads=self.config["text"]["num_heads"],
+            mlp_dim=self.config["text"]["mlp_dim"],
+            dropout_rate=self.config["text"]["dropout_rate"],
+        )
+        
+        self.image_encoder = ImageEncoderPyTorch(
+            patch_size=self.config["image"]["patch_size"],
+            hidden_size=self.config["image"]["hidden_size"],
+            num_layers=self.config["image"]["num_layers"],
+            num_heads=self.config["image"]["num_heads"],
+            mlp_dim=self.config["image"]["mlp_dim"],
+            dropout_rate=self.config["image"]["dropout_rate"],
+        )
+        
+        self.audio_encoder = AudioEncoderPyTorch(
+            patch_size=self.config["audio"]["patch_size"],
+            hidden_size=self.config["audio"]["hidden_size"],
+            num_layers=self.config["audio"]["num_layers"],
+            num_heads=self.config["audio"]["num_heads"],
+            mlp_dim=self.config["audio"]["mlp_dim"],
+            dropout_rate=self.config["audio"]["dropout_rate"],
+        )
+        
+        self.video_encoder = VideoEncoderPyTorch(
+            patch_size=self.config["video"]["patch_size"],
+            frame_stride=self.config["video"]["frame_stride"],
+            hidden_size=self.config["video"]["hidden_size"],
+            num_layers=self.config["video"]["num_layers"],
+            num_heads=self.config["video"]["num_heads"],
+            mlp_dim=self.config["video"]["mlp_dim"],
+            dropout_rate=self.config["video"]["dropout_rate"],
+        )
+        
+        # Cross-attention fusion module
+        self.fusion = CrossAttentionFusionPyTorch(
+            hidden_size=self.config["fusion"]["hidden_size"],
+            num_layers=self.config["fusion"]["num_layers"],
+            num_heads=self.config["fusion"]["num_heads"],
+            mlp_dim=self.config["fusion"]["mlp_dim"],
+            dropout_rate=self.config["fusion"]["dropout_rate"],
+        )
+        
+        # Task-specific heads
+        self.contrastive_head = ContrastiveHeadPyTorch(
+            hidden_size=self.config["heads"]["hidden_size"],
+            projection_dim=self.config["heads"]["projection_dim"],
+            temperature=self.config["heads"]["temperature"],
+        )
+        
+        self.generative_head = GenerativeHeadPyTorch(
+            hidden_size=self.config["heads"]["hidden_size"],
+            vocab_size=self.config["text"]["vocab_size"],
+        )
+    
+    def get_modality_encodings(
+        self,
+        text=None,
+        images=None,
+        audio=None,
+        video=None,
+        training: bool = False,
+    ) -> Dict[str, torch.Tensor]:
+        """Encode each provided modality."""
+        encodings = {}
+        attention_masks = {}
+        
+        if text is not None:
+            text_embeddings, text_mask = self.text_encoder(
+                text["input_ids"], 
+                text["attention_mask"],
+                training=training,
+            )
+            encodings["text"] = text_embeddings
+            attention_masks["text"] = text_mask
+        
+        if images is not None:
+            image_embeddings, image_mask = self.image_encoder(
+                images["pixel_values"],
+                training=training,
+            )
+            encodings["image"] = image_embeddings
+            attention_masks["image"] = image_mask
+        
+        if audio is not None:
+            audio_embeddings, audio_mask = self.audio_encoder(
+                audio["features"],
+                training=training,
+            )
+            encodings["audio"] = audio_embeddings
+            attention_masks["audio"] = audio_mask
+        
+        if video is not None:
+            video_embeddings, video_mask = self.video_encoder(
+                video["frames"],
+                training=training,
+            )
+            encodings["video"] = video_embeddings
+            attention_masks["video"] = video_mask
+        
+        return encodings, attention_masks
+    
+    def forward(
+        self,
+        text=None,
+        images=None,
+        audio=None,
+        video=None,
+        training: bool = False,
+    ) -> Dict[str, torch.Tensor]:
+        # Get individual modality encodings
+        encodings, attention_masks = self.get_modality_encodings(
+            text=text,
+            images=images,
+            audio=audio,
+            video=video,
+            training=training,
+        )
+        
+        # Fuse modalities using cross-attention
+        fused_embeddings, attention_weights = self.fusion(
+            encodings, 
+            attention_masks,
+            training=training,
+        )
+        
+        # Get embeddings for contrastive learning
+        contrastive_embeddings = self.contrastive_head(fused_embeddings)
+        
+        # Get logits for generative tasks (if needed)
+        generative_logits = None
+        if training or self.config.get("always_generate", False):
+            generative_logits = self.generative_head(fused_embeddings)
+        
+        return {
+            "fused_embeddings": fused_embeddings,
+            "contrastive_embeddings": contrastive_embeddings,
+            "generative_logits": generative_logits,
+            "attention_weights": attention_weights,
+            "modality_encodings": encodings,
+        }
+```
+
+### 2. Cross-Modal Fusion with Advanced Attention Mechanisms
+
+```python
+# mmrl/modeling/fusion/cross_attention.py
+
+from typing import Dict, List, Optional, Tuple, Union
+
+import flax.linen as nn
+import jax
+import jax.numpy as jnp
+
+
+class CrossAttentionBlock(nn.Module):
+    """
+    Cross-attention block for fusing information between modalities.
+    
+    Based on advanced cross-attention mechanisms from Flamingo and PaLI-X.
+    """
+    hidden_size: int
+    num_heads: int
+    mlp_dim: int
+    dropout_rate: float = 0.1
+    attention_dropout_rate: float = 0.1
+    dtype: jnp.dtype = jnp.float32
+    
+    @nn.compact
+    def __call__(
+        self,
+        q_inputs: jnp.ndarray,
+        kv_inputs: jnp.ndarray,
+        q_mask: Optional[jnp.ndarray] = None,
+        kv_mask: Optional[jnp.ndarray] = None,
+        deterministic: bool = True,
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        # Layer normalization
+        q = nn.LayerNorm(dtype=self.dtype)(q_inputs)
+        kv = nn.LayerNorm(dtype=self.dtype)(kv_inputs)
+        
+        # Cross-attention
+        x, attention_weights = nn.MultiHeadAttention(
+            num_heads=self.num_heads,
+            head_dim=self.hidden_size // self.num_heads,
+            dropout_rate=self.attention_dropout_rate,
+            dtype=self.dtype,
+        )(
+            q,
+            kv,
+            mask=kv_mask,
+            deterministic=deterministic,
+            decode=False,
+        )
+        
+        # Apply attention mask if provided
+        if q_mask is not None:
+            x = x * q_mask[:, :, None]
+        
+        # Residual connection
+        x = x + q_inputs
+        
+        # MLP block
+        y = nn.LayerNorm(dtype=self.dtype)(x)
+        y = nn.Dense(
+            self.mlp_dim,
+            dtype=self.dtype,
+        )(y)
+        y = nn.gelu(y)
+        y = nn.Dropout(rate=self.dropout_rate)(y, deterministic=deterministic)
+        y = nn.Dense(
+            self.hidden_size,
+            dtype=self.dtype,
+        )(y)
+        y = nn.Dropout(rate=self.dropout_rate)(y, deterministic=deterministic)
+        
+        # Second residual connection
+        return x + y, attention_weights
+
+
+class CrossAttentionFusion(nn.Module):
+    """
+    Cross-attention-based fusion of multiple modalities.
+    
+    Implements hierarchical cross-attention where each modality attends to
+    every other modality in a configurable order.
+    """
+    hidden_size: int
+    num_layers: int
+    num_heads: int
+    mlp_dim: int
+    dropout_rate: float = 0.1
+    dtype: jnp.dtype = jnp.float32
+    
+    @nn.compact
+    def __call__(
+        self,
+        modality_encodings: Dict[str, jnp.ndarray],
+        attention_masks: Dict[str, jnp.ndarray],
+        fusion_order: Optional[List[Tuple[str, str]]] = None,
+        deterministic: bool = True,
+    ) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
+        # Default fusion order if not specified
+        if fusion_order is None:
+            # Default hierarchical fusion: text→image→audio→video
+            available_modalities = list(modality_encodings.keys())
+            if len(available_modalities) <= 1:
+                # Only one modality, no fusion needed
+                modality = available_modalities[0]
+                return modality_encodings[modality], {}
+                
+            # Create pairs for cross-attention: each modality attends to all previous ones
+            fusion_order = []
+            for i in range(1, len(available_modalities)):
+                target = available_modalities[i]
+                for j in range(i):
+                    source = available_modalities[j]
+                    fusion_order.append((target, source))
+        
+        # Store attention weights for visualization/analysis
+        all_attention_weights = {}
+        
+        # Apply cross-attention layers according to fusion order
+        for layer in range(self.num_layers):
+            layer_attention_weights = {}
+            
+            # Project all modalities to the same hidden dimension if needed
+            projected_encodings = {}
+            for modality, encodings in modality_encodings.items():
+                if encodings.shape[-1] != self.hidden_size:
+                    projected_encodings[modality] = nn.Dense(
+                        self.hidden_size,
+                        dtype=self.dtype,
+                        name=f"{modality}_projection",
+                    )(encodings)
+                else:
+                    projected_encodings[modality] = encodings
+            
+            # Perform cross-attention between modalities
+            for target, source in fusion_order:
+                # Skip if either modality is missing
+                if target not in projected_encodings or source not in projected_encodings:
+                    continue
+                
+                # Get query from target modality
+                q = projected_encodings[target]
+                q_mask = attention_masks.get(target)
+                
+                # Get key/value from source modality
+                kv = projected_encodings[source]
+                kv_mask = attention_masks.get(source)
+                
+                # Apply cross-attention
+                fusion_block = CrossAttentionBlock(
+                    hidden_size=self.hidden_size,
+                    num_heads=self.num_heads,
+                    mlp_dim=self.mlp_dim,
+                    dropout_rate=self.dropout_rate,
+                    dtype=self.dtype,
+                    name=f"layer_{layer}_{target}_to_{source}",
+                )
+                
+                new_q, attn_weights = fusion_block(
+                    q,
+                    kv,
+                    q_mask=q_mask,
+                    kv_mask=kv_mask,
+                    deterministic=deterministic,
+                )
+                
+                # Update the target modality with fused information
+                projected_encodings[target] = new_q
+                
+                # Store attention weights
+                layer_attention_weights[f"{target}_to_{source}"] = attn_weights
+            
+            # Update all modality encodings
+            modality_encodings = projected_encodings
+            
+            # Store attention weights for this layer
+            all_attention_weights[f"layer_{layer}"] = layer_attention_weights
+        
+        # Combine all modalities into a unified representation
+        # Use weighted average of modality encodings
+        combined_encodings = []
+        combined_mask = []
+        
+        for modality, encodings in modality_encodings.items():
+            combined_encodings.append(encodings)
+            mask = attention_masks.get(modality, jnp.ones((encodings.shape[0], encodings.shape[1])))
+            combined_mask.append(mask)
+        
+        # Stack all encodings and masks
+        stacked_encodings = jnp.concatenate(combined_encodings, axis=1)
+        stacked_mask = jnp.concatenate(combined_mask, axis=1)
+        
+        # Final self-attention to fuse all modalities
+        final_attn = nn.SelfAttention(
+            num_heads=self.num_heads,
+            dropout_rate=self.dropout_rate,
+            dtype=self.dtype,
+            name="final_fusion",
+        )(
+            stacked_encodings,
+            mask=stacked_mask,
+            deterministic=deterministic,
+        )
+        
+        # Get CLS embedding as the final representation
+        # Alternative: use attention pooling over all tokens
+        cls_embedding = final_attn[:, 0]
+        
+        return cls_embedding, all_attention_weights
+```
+
+### 3. Contrastive Learning with Hard Negative Mining
+
+```python
+# mmrl/modeling/losses/contrastive.py
+
+from typing import Dict, Optional, Tuple, Union
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+
+def contrastive_loss_jax(
+    embeddings: jnp.ndarray,
+    labels: jnp.ndarray,
+    temperature: float = 0.07,
+    reduction: str = "mean",
+) -> jnp.ndarray:
+    """
+    Compute InfoNCE/NT-Xent loss for contrastive learning.
+    
+    Args:
+        embeddings: Normalized embeddings of shape [batch_size, embedding_dim]
+        labels: Labels for positive pairs, shape [batch_size]
+        temperature: Temperature parameter for softmax
+        reduction: Reduction method ('none', 'mean', 'sum')
+    
+    Returns:
+        Contrastive loss
+    """
+    # Compute similarity matrix
+    similarity = jnp.matmul(embeddings, embeddings.T) / temperature
+    
+    # Mask out self-similarity
+    batch_size = similarity.shape[0]
+    mask = jnp.eye(batch_size)
+    similarity = similarity - mask * 1e9
+    
+    # Create positive pair mask
+    # positive_mask[i,j] = 1 if embeddings[i] and embeddings[j] have same label
+    positive_mask = labels[:, None] == labels[None, :]
+    positive_mask = positive_mask.astype(jnp.int32) - mask  # Remove self
+    
+    # Calculate loss for each element
+    exp_similarity = jnp.exp(similarity)
+    
+    # For each row, compute numerator (sum of exp similarities for positive pairs)
+    positive_similarities = jnp.where(positive_mask, exp_similarity, 0.0)
+    numerator = jnp.sum(positive_similarities, axis=1)
+    
+    # Denominator is sum of all exp similarities
+    denominator = jnp.sum(exp_similarity, axis=1)
+    
+    # Compute loss
+    losses = -jnp.log(numerator / denominator + 1e-8)
+    
+    # Apply reduction
+    if reduction == "none":
+        return losses
+    elif reduction == "mean":
+        return jnp.mean(losses)
+    elif reduction == "sum":
+        return jnp.sum(losses)
+    else:
+        raise ValueError(f"Unsupported reduction: {reduction}")
+
+
+def hard_negative_mining_jax(
+    embeddings: jnp.ndarray,
+    labels: jnp.ndarray,
+    k: int = 10,
+    margin: float = 0.5,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    Mine hard negative examples for improved contrastive learning.
+    
+    Hard negatives are embeddings with different labels that are close
+    in the embedding space.
+    
+    Args:
+        embeddings: Normalized embeddings of shape [batch_size, embedding_dim]
+        labels: Labels for positive pairs, shape [batch_size]
+        k: Number of hard negatives to mine per example
+        margin: Margin for semi-hard negatives
+    
+    Returns:
+        Hard negative mask and weights
+    """
+    # Compute similarity matrix
+    similarity = jnp.matmul(embeddings, embeddings.T)
+    
+    # Create negative mask (embedding pairs with different labels)
+    negative_mask = (labels[:, None] != labels[None, :]).astype(jnp.float32)
+    
+    # For each anchor, find the k hardest negatives
+    # (highest similarity among negatives)
+    similarities_with_negatives = similarity * negative_mask - (1 - negative_mask) * 1e9
+    
+    # Get top-k hard negatives
+    hard_negative_similarities, hard_negative_indices = jax.lax.top_k(
+        similarities_with_negatives, k
+    )
+    
+    # Create hard negative mask
+    batch_size = embeddings.shape[0]
+    hard_negative_mask = jnp.zeros((batch_size, batch_size))
+    
+    # Expensive sequential version
+    # JAX doesn't support scattered assignment directly
+    def update_row(i, mask):
+        indices = hard_negative_indices[i]
+        updates = jnp.ones_like(indices, dtype=jnp.float32)
+        row_update = jnp.zeros((batch_size,), dtype=jnp.float32).at[indices].set(updates)
+        return mask.at[i].set(row_update)
+    
+    hard_negative_mask = jax.lax.fori_loop(
+        0, batch_size, update_row, hard_negative_mask
+    )
+    
+    # Create weights for hard negatives based on similarity
+    # Applies higher weight to harder negatives (more similar)
+    hard_negative_weights = hard_negative_mask * (
+        similarity * hard_negative_mask + margin
+    )
+    
+    return hard_negative_mask, hard_negative_weights
+
+
+def contrastive_loss_with_hard_negatives_jax(
+    embeddings: jnp.ndarray,
+    labels: jnp.ndarray,
+    temperature: float = 0.07,
+    hard_negative_k: int = 10,
+    hard_negative_weight: float = 2.0,
+    reduction: str = "mean",
+) -> jnp.ndarray:
+    """
+    Compute contrastive loss with hard negative mining.
+    
+    Args:
+        embeddings: Normalized embeddings of shape [batch_size, embedding_dim]
+        labels: Labels for positive pairs, shape [batch_size]
+        temperature: Temperature parameter
+        hard_negative_k: Number of hard negatives to mine per example
+        hard_negative_weight: Weight factor for hard negatives
+        reduction: Reduction method ('none', 'mean', 'sum')
+    
+    Returns:
+        Enhanced contrastive loss
+    """
+    # Get base contrastive loss
+    base_loss = contrastive_loss_jax(
+        embeddings, labels, temperature, reduction="none"
+    )
+    
+    # Mine hard negatives
+    hard_negative_mask, hard_negative_weights = hard_negative_mining_jax(
+        embeddings, labels, k=hard_negative_k
+    )
+    
+    # Compute similarity matrix
+    similarity = jnp.matmul(embeddings, embeddings.T) / temperature
+    
+    # Create negative pair mask
+    negative_mask = (labels[:, None] != labels[None, :]).astype(jnp.float32)
+    
+    # Compute loss from hard negatives
+    hard_negative_exp = jnp.exp(similarity) * hard_negative_mask * hard_negative_weight
+    
+    # Get positive mask (same as in regular contrastive loss)
+    batch_size = similarity.shape[0]
+    mask = jnp.eye(batch_size)
+    positive_mask = (labels[:, None] == labels[None, :]).astype(jnp.int32) - mask
+    positive_similarities = jnp.where(positive_mask, jnp.exp(similarity), 0.0)
+    numerator = jnp.sum(positive_similarities, axis=1)
+    
+    # Include hard negatives in denominator with increased weight
+    exp_similarity = jnp.exp(similarity)
+    denominator = jnp.sum(exp_similarity - hard_negative_exp, axis=1) + jnp.sum(hard_negative_exp, axis=1)
+    
+    # Compute enhanced loss
+    enhanced_losses = -jnp.log(numerator / denominator + 1e-8)
+    
+    # Combine base loss with enhanced loss
+    losses = base_loss + enhanced_losses
+    
+    # Apply reduction
+    if reduction == "none":
+        return losses
+    elif reduction == "mean":
+        return jnp.mean(losses)
+    elif reduction == "sum":
+        return jnp.sum(losses)
+    else:
+        raise ValueError(f"Unsupported reduction: {reduction}")
+
+
+# PyTorch versions for training with DeepSpeed/FSDP
+
+def contrastive_loss_torch(
+    embeddings: torch.Tensor,
+    labels: torch.Tensor,
+    temperature: float = 0.07,
+    reduction: str = "mean",
+) -> torch.Tensor:
+    """PyTorch implementation of contrastive loss."""
+    # Compute similarity matrix
+    similarity = torch.matmul(embeddings, embeddings.T) / temperature
+    
+    # Mask out self-similarity
+    batch_size = similarity.shape[0]
+    mask = torch.eye(batch_size, device=embeddings.device)
+    similarity = similarity - mask * 1e9
+    
+    # Create positive pair mask
+    positive_mask = (labels.unsqueeze(1) == labels.unsqueeze(0)).float() - mask
+    
+    # Calculate loss for each element
+    exp_similarity = torch.exp(similarity)
+    
+    # For each row, compute numerator (sum of exp similarities for positive pairs)
+    positive_similarities = torch.where(positive_mask > 0, exp_similarity, torch.zeros_like(exp_similarity))
+    numerator = torch.sum(positive_similarities, dim=1)
+    
+    # Denominator is sum of all exp similarities
+    denominator = torch.sum(exp_similarity, dim=1)
+    
+    # Compute loss
+    losses = -torch.log(numerator / denominator + 1e-8)
+    
+    # Apply reduction
+    if reduction == "none":
+        return losses
+    elif reduction == "mean":
+        return torch.mean(losses)
+    elif reduction == "sum":
+        return torch.sum(losses)
+    else:
+        raise ValueError(f"Unsupported reduction: {reduction}")
+
+
+def hard_negative_mining_torch(
+    embeddings: torch.Tensor,
+    labels: torch.Tensor,
+    k: int = 10,
+    margin: float = 0.5,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """PyTorch implementation of hard negative mining."""
+    # Compute similarity matrix
+    similarity = torch.matmul(embeddings, embeddings.T)
+    
+    # Create negative mask (embedding pairs with different labels)
+    negative_mask = (labels.unsqueeze(1) != labels.unsqueeze(0)).float()
+    
+    # For each anchor, find the k hardest negatives
+    similarities_with_negatives = similarity * negative_mask - (1 - negative_mask) * 1e9
+    
+    # Get top-k hard negatives
+    hard_negative_similarities, hard_negative_indices = torch.topk(
+        similarities_with_negatives, k
+    )
+    
+    # Create hard negative mask
+    batch_size = embeddings.shape[0]
+    hard_negative_mask = torch.zeros((batch_size, batch_size), device=embeddings.device)
+    
+    # Set hard negative mask
+    for i in range(batch_size):
+        hard_negative_mask[i, hard_negative_indices[i]] = 1.0
+    
+    # Create weights for hard negatives based on similarity
+    hard_negative_weights = hard_negative_mask * (
+        similarity * hard_negative_mask + margin
+    )
+    
+    return hard_negative_mask, hard_negative_weights
+
+
+def contrastive_loss_with_hard_negatives_torch(
+    embeddings: torch.Tensor,
+    labels: torch.Tensor,
+    temperature: float = 0.07,
+    hard_negative_k: int = 10,
+    hard_negative_weight: float = 2.0,
+    reduction: str = "mean",
+) -> torch.Tensor:
+    """PyTorch implementation of contrastive loss with hard negative mining."""
+    # Get base contrastive loss
+    base_loss = contrastive_loss_torch(
+        embeddings, labels, temperature, reduction="none"
+    )
+    
+    # Mine hard negatives
+    hard_negative_mask, hard_negative_weights = hard_negative_mining_torch(
+        embeddings, labels, k=hard_negative_k
+    )
+    
+    # Compute similarity matrix
+    similarity = torch.matmul(embeddings, embeddings.T) / temperature
+    
+    # Create negative pair mask
+    negative_mask = (labels.unsqueeze(1) != labels.unsqueeze(0)).float()
+    
+    # Compute loss from hard negatives
+    hard_negative_exp = torch.exp(similarity) * hard_negative_mask * hard_negative_weight
+    
+    # Get positive mask (same as in regular contrastive loss)
+    batch_size = similarity.shape[0]
+    mask = torch.eye(batch_size, device=embeddings.device)
+    positive_mask = (labels.unsqueeze(1) == labels.unsqueeze(0)).float() - mask
+    positive_similarities = torch.where(positive_mask > 0, torch.exp(similarity), torch.zeros_like(similarity))
+    numerator = torch.sum(positive_similarities, dim=1)
+    
+    # Include hard negatives in denominator with increased weight
+    exp_similarity = torch.exp(similarity)
+    denominator = torch.sum(exp_similarity - hard_negative_exp, dim=1) + torch.sum(hard_negative_exp, dim=1)
+    
+    # Compute enhanced loss
+    enhanced_losses = -torch.log(numerator / denominator + 1e-8)
+    
+    # Combine base loss with enhanced loss
+    losses = base_loss + enhanced_losses
+    
+    # Apply reduction
+    if reduction == "none":
+        return losses
+    elif reduction == "mean":
+        return torch.mean(losses)
+    elif reduction == "sum":
+        return torch.sum(losses)
+    else:
+        raise ValueError(f"Unsupported reduction: {reduction}")
+```
+
+### 4. Data Pipeline for Multimodal Datasets
+
+```python
+# mmrl/data/tfdata/dataset.py
+
+import os
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
+import numpy as np
+import tensorflow as tf
+import tensorflow_io as tfio
+import tensorflow_datasets as tfds
+
+
+class MultiModalDatasetTF:
+    """
+    TensorFlow Data pipeline for multimodal datasets.
+    
+    Handles preprocessing and loading of multimodal data from various sources:
+    - WebImageText
+    - AudioSet
+    - YouTube-8M
+    - HowTo100M
+    """
+    
+    def __init__(
+        self,
+        dataset_name: str,
+        split: str = "train",
+        data_dir: Optional[str] = None,
+        modalities: List[str] = ["text", "image", "audio", "video"],
+        text_processor: Optional[Callable] = None,
+        image_processor: Optional[Callable] = None,
+        audio_processor: Optional[Callable] = None,
+        video_processor: Optional[Callable] = None,
+        batch_size: int = 32,
+        shuffle_buffer_size: int = 10000,
+        prefetch_size: int = tf.data.AUTOTUNE,
+        deterministic: bool = False,
+        cache: bool = False,
+    ):
+        """
+        Initialize the multimodal dataset.
+        
+        Args:
+            dataset_name: Name of the dataset to load
+            split: Data split to use ('train', 'validation', 'test')
+            data_dir: Directory containing the dataset
+            modalities: List of modalities to load
+            text_processor: Function to process text data
+            image_processor: Function to process image data
+            audio_processor: Function to process audio data
+            video_processor: Function to process video data
+            batch_size: Batch size for the dataset
+            shuffle_buffer_size: Size of the shuffle buffer
+            prefetch_size: Number of elements to prefetch
+            deterministic: Whether to use deterministic data loading
+            cache: Whether to cache the dataset
+        """
+        self.dataset_name = dataset_name
+        self.split = split
+        self.data_dir = data_dir
+        self.modalities = modalities
+        self.batch_size = batch_size
+        self.shuffle_buffer_size = shuffle_buffer_size
+        self.prefetch_size = prefetch_size
+        self.deterministic = deterministic
+        self.cache = cache
+        
+        # Set default processors if not provided
+        self.text_processor = text_processor or self._default_text_processor
+        self.image_processor = image_processor or self._default_image_processor
+        self.audio_processor = audio_processor or self._default_audio_processor
+        self.video_processor = video_processor or self._default_video_processor
+        
+        # Create dataset
+        self.dataset = self._create_dataset()
+    
+    def _create_dataset(self) -> tf.data.Dataset:
+        """Create and configure the dataset."""
+        # Load raw dataset
+        if self.dataset_name.lower() == "webimagetext":
+            dataset = self._load_webimagetext()
+        elif self.dataset_name.lower() == "audioset":
+            dataset = self._load_audioset()
+        elif self.dataset_name.lower() == "youtube8m":
+            dataset = self._load_youtube8m()
+        elif self.dataset_name.lower() == "howto100m":
+            dataset = self._load_howto100m()
+        else:
+            # Try loading from TensorFlow Datasets
+            try:
+                dataset = tfds.load(
+                    self.dataset_name,
+                    split=self.split,
+                    data_dir=self.data_dir,
+                    with_info=False,
+                )
+            except:
+                raise ValueError(f"Unsupported dataset: {self.dataset_name}")
+        
+        # Apply caching if requested
+        if self.cache:
+            dataset = dataset.cache()
+        
+        # Shuffle dataset (for training)
+        if self.split == "train":
+            dataset = dataset.shuffle(
+                self.shuffle_buffer_size,
+                reshuffle_each_iteration=True,
+            )
+        
+        # Apply preprocessing
+        dataset = dataset.map(
+            self._preprocess_example,
+            num_parallel_calls=tf.data.AUTOTUNE,
+            deterministic=self.deterministic,
+        )
+        
+        # Filter invalid examples
+        dataset = dataset.filter(self._is_valid_example)
+        
+        # Batch dataset
+        dataset = dataset.batch(
+            self.batch_size,
+            drop_remainder=self.split == "train",
+            deterministic=self.deterministic,
+        )
+        
+        # Prefetch data
+        dataset = dataset.prefetch(self.prefetch_size)
+        
+        return dataset
+    
+    def _load_webimagetext(self) -> tf.data.Dataset:
+        """Load WebImageText dataset."""
+        # Example implementation for loading WebImageText
+        # In a real implementation, this would handle the specific format of WebImageText
+        if self.data_dir is None:
+            raise ValueError("data_dir must be specified for WebImageText")
+        
+        # Example of loading from TFRecord files
+        pattern = os.path.join(self.data_dir, f"webimagetext-{self.split}*.tfrecord")
+        dataset = tf.data.TFRecordDataset(
+            tf.data.Dataset.list_files(pattern, shuffle=self.split == "train")
+        )
+        
+        # Parse TFRecord examples
+        def _parse_example(example_proto):
+            feature_description = {
+                'image/encoded': tf.io.FixedLenFeature([], tf.string),
+                'image/format': tf.io.FixedLenFeature([], tf.string),
+                'image/height': tf.io.FixedLenFeature([], tf.int64),
+                'image/width': tf.io.FixedLenFeature([], tf.int64),
+                'text': tf.io.FixedLenFeature([], tf.string),
+                'label': tf.io.FixedLenFeature([], tf.int64),
+            }
+            return tf.io.parse_single_example(example_proto, feature_description)
+        
+        return dataset.map(_parse_example, num_parallel_calls=tf.data.AUTOTUNE)
+    
+    def _load_audioset(self) -> tf.data.Dataset:
+        """Load AudioSet dataset."""
+        # Example implementation for loading AudioSet
+        if self.data_dir is None:
+            raise ValueError("data_dir must be specified for AudioSet")
+        
+        pattern = os.path.join(self.data_dir, f"audioset-{self.split}*.tfrecord")
+        dataset = tf.data.TFRecordDataset(
+            tf.data.Dataset.list_files(pattern, shuffle=self.split == "train")
+        )
+        
+        # Parse TFRecord examples
+        def _parse_example(example_proto):
+            feature_description = {
+                'audio/encoded': tf.io.FixedLenFeature([], tf.string),
+                'audio/format': tf.io.FixedLenFeature([], tf.string),
+                'audio/sample_rate': tf.io.FixedLenFeature([], tf.int64),
+                'audio/duration_ms': tf.io.FixedLenFeature([], tf.int64),
+                'labels': tf.io.VarLenFeature(tf.int64),
+                'text': tf.io.FixedLenFeature([], tf.string, default_value=''),
+            }
+            return tf.io.parse_single_example(example_proto, feature_description)
+        
+        return dataset.map(_parse_example, num_parallel_calls=tf.data.AUTOTUNE)
+    
+    def _load_youtube8m(self) -> tf.data.Dataset:
+        """Load YouTube-8M dataset."""
+        # Example implementation for loading YouTube-8M
+        if self.data_dir is None:
+            raise ValueError("data_dir must be specified for YouTube-8M")
+        
+        pattern = os.path.join(self.data_dir, f"youtube8m-{self.split}*.tfrecord")
+        dataset = tf.data.TFRecordDataset(
+            tf.data.Dataset.list_files(pattern, shuffle=self.split == "train")
+        )
+        
+        # Parse TFRecord examples
+        def _parse_example(example_proto):
+            feature_description = {
+                'id': tf.io.FixedLenFeature([], tf.string),
+                'labels': tf.io.VarLenFeature(tf.int64),
+                'mean_rgb': tf.io.FixedLenFeature([1024], tf.float32),
+                'mean_audio': tf.io.FixedLenFeature([128], tf.float32),
+            }
+            return tf.io.parse_single_example(example_proto, feature_description)
+        
+        return dataset.map(_parse_example, num_parallel_calls=tf.data.AUTOTUNE)
+    
+    def _load_howto100m(self) -> tf.data.Dataset:
+        """Load HowTo100M dataset."""
+        # Example implementation for loading HowTo100M
+        if self.data_dir is None:
+            raise ValueError("data_dir must be specified for HowTo100M")
+        
+        pattern = os.path.join(self.data_dir, f"howto100m-{self.split}*.tfrecord")
+        dataset = tf.data.TFRecordDataset(
+            tf.data.Dataset.list_files(pattern, shuffle=self.split == "train")
+        )
+        
+        # Parse TFRecord examples
+        def _parse_example(example_proto):
+            feature_description = {
+                'video_id': tf.io.FixedLenFeature([], tf.string),
+                'caption': tf.io.FixedLenFeature([], tf.string),
+                'start_time': tf.io.FixedLenFeature([], tf.float32),
+                'end_time': tf.io.FixedLenFeature([], tf.float32),
+                'video_features': tf.io.FixedLenFeature([512], tf.float32),
+            }
+            return tf.io.parse_single_example(example_proto, feature_description)
+        
+        return dataset.map(_parse_example, num_parallel_calls=tf.data.AUTOTUNE)
+    
+    def _default_text_processor(self, text: tf.Tensor) -> Dict[str, tf.Tensor]:
+        """Default text processor."""
+        # In a real implementation, this would use a tokenizer
+        # Here we just convert to lowercase and split by space as a simple example
+        text = tf.strings.lower(text)
+        text = tf.strings.split(text)
+        return {
+            "input_ids": text,
+            "attention_mask": tf.ones_like(text, dtype=tf.int32),
+        }
+    
+    def _default_image_processor(self, image: tf.Tensor) -> Dict[str, tf.Tensor]:
+        """Default image processor."""
+        # Decode image if needed
+        if image.dtype == tf.string:
+            image = tf.image.decode_image(image, channels=3)
+        
+        # Resize and normalize
+        image = tf.image.resize(image, [224, 224])
+        image = tf.cast(image, tf.float32) / 255.0
+        
+        return {
+            "pixel_values": image,
+        }
+    
+    def _default_audio_processor(self, audio: tf.Tensor) -> Dict[str, tf.Tensor]:
+        """Default audio processor."""
+        # Decode audio if needed
+        if audio.dtype == tf.string:
+            # Use tensorflow_io to decode audio
+            # This is a placeholder - actual implementation would depend on audio format
+            audio = tfio.audio.decode_wav(audio, desired_channels=1)
+        
+        # Convert to mel spectrogram
+        # This is a placeholder - real implementation would compute proper mel spectrograms
+        spectrogram = tf.abs(tf.signal.stft(audio, frame_length=256, frame_step=128))
+        
+        return {
+            "features": spectrogram,
+        }
+    
+    def _default_video_processor(self, video: tf.Tensor) -> Dict[str, tf.Tensor]:
+        """Default video processor."""
+        # In a real implementation, this would extract frames, apply transforms, etc.
+        # Here we just return the input as a placeholder
+        return {
+            "frames": video,
+        }
+    
+    def _preprocess_example(self, example: Dict[str, tf.Tensor]) -> Dict[str, Any]:
+        """Preprocess a single example."""
+        result = {}
+        
+        # Process text if available and requested
+        if "text" in self.modalities and "text" in example:
+            result["text"] = self.text_processor(example["text"])
+        
+        # Process image if available and requested
+        if "image" in self.modalities and any(k.startswith("image/") for k in example.keys()):
+            image_tensor = example.get("image/encoded", example.get("image", None))
+            if image_tensor is not None:
+                result["image"] = self.image_processor(image_tensor)
+        
+        # Process audio if available and requested
+        if "audio" in self.modalities and any(k.startswith("audio/") for k in example.keys()):
+            audio_tensor = example.get("audio/encoded", example.get("audio", None))
+            if audio_tensor is not None:
+                result["audio"] = self.audio_processor(audio_tensor)
+        
+        # Process video if available and requested
+        if "video" in self.modalities and any(k.startswith("video/") for k in example.keys()):
+            video_tensor = example.get("video/encoded", example.get("video", None))
+            if video_tensor is not None:
+                result["video"] = self.video_processor(video_tensor)
+        
+        # Add labels if available
+        if "label" in example:
+            result["label"] = example["label"]
+        elif "labels" in example:
+            # Convert sparse tensor to dense if needed
+            if isinstance(example["labels"], tf.sparse.SparseTensor):
+                result["labels"] = tf.sparse.to_dense(example["labels"])
+            else:
+                result["labels"] = example["labels"]
+        
+        return result
+    
+    def _is_valid_example(self, example: Dict[str, Any]) -> tf.Tensor:
+        """Check if an example is valid (has required modalities)."""
+        # At least one modality must be present
+        modality_present = False
+        for modality in self.modalities:
+            if modality in example:
+                modality_present = True
+                break
+        
+        return modality_present
+    
+    def get_dataset(self) -> tf.data.Dataset:
+        """Get the prepared dataset."""
+        return self.dataset
+```
+
+### 5. Distributed Training with DeepSpeed
+
+```python
+# mmrl/training/distributed/deepspeed_trainer.py
+
+import os
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
+import torch
+import torch.nn as nn
+import torch.distributed as dist
+import deepspeed
+from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
+
+from mmrl.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+class DeepSpeedTrainer:
+    """
+    Trainer for multimodal models using DeepSpeed.
+    
+    Handles distributed training with DeepSpeed's ZeRO optimizer stages
+    for efficient large-scale training.
+    """
+    
+    def __init__(
+        self,
+        model: nn.Module,
+        config: Dict[str, Any],
+        train_dataset: Optional[torch.utils.data.Dataset] = None,
+        eval_dataset: Optional[torch.utils.data.Dataset] = None,
+        local_rank: int = -1,
+        deepspeed_config: Optional[Dict[str, Any]] = None,
+        output_dir: str = "outputs",
+    ):
+        """
+        Initialize DeepSpeed trainer.
+        
+        Args:
+            model: Model to train
+            config: Training configuration
+            train_dataset: Training dataset
+            eval_dataset: Evaluation dataset
+            local_rank: Local rank for distributed training
+            deepspeed_config: DeepSpeed configuration
+            output_dir: Output directory for checkpoints
+        """
+        self.model = model
+        self.config = config
+        self.train_dataset = train_dataset
+        self.eval_dataset = eval_dataset
+        self.local_rank = local_rank if local_rank >= 0 else int(os.environ.get("LOCAL_RANK", "0"))
+        self.output_dir = output_dir
+        
+        # Set up DeepSpeed
+        self.deepspeed_config = deepspeed_config or self._get_default_deepspeed_config()
+        
+        # Initialize DeepSpeed
+        self.model_engine, self.optimizer, _, _ = deepspeed.initialize(
+            model=model,
+            model_parameters=model.parameters(),
+            config=self.deepspeed_config,
+        )
+        
+        # Set up data loaders
+        self.train_dataloader = self._setup_dataloader(train_dataset, is_train=True)
+        self.eval_dataloader = self._setup_dataloader(eval_dataset, is_train=False)
+        
+        # Track training progress
+        self.global_step = 0
+        self.epoch = 0
+        self.best_metric = float("inf")
+    
+    def _get_default_deepspeed_config(self) -> Dict[str, Any]:
+        """Get default DeepSpeed configuration."""
+        return {
+            "train_batch_size": self.config.get("train_batch_size", 32),
+            "gradient_accumulation_steps": self.config.get("gradient_accumulation_steps", 1),
+            "optimizer": {
+                "type": "AdamW",
+                "params": {
+                    "lr": self.config.get("learning_rate", 1e-4),
+                    "weight_decay": self.config.get("weight_decay", 0.01),
+                    "betas": [0.9, 0.999],
+                    "eps": 1e-8,
+                },
+            },
+            "scheduler": {
+                "type": "WarmupLR",
+                "params": {
+                    "warmup_min_lr": 0,
+                    "warmup_max_lr": self.config.get("learning_rate", 1e-4),
+                    "warmup_num_steps": self.config.get("warmup_steps", 1000),
+                },
+            },
+            "fp16": {
+                "enabled": self.config.get("fp16", True),
+                "loss_scale": 0,
+                "initial_scale_power": 16,
+            },
+            "zero_optimization": {
+                "stage": self.config.get("zero_stage", 2),
+                "offload_optimizer": {
+                    "device": "cpu",
+                    "pin_memory": True,
+                } if self.config.get("offload_optimizer", False) else False,
+                "offload_param": {
+                    "device": "cpu",
+                    "pin_memory": True,
+                } if self.config.get("offload_param", False) else False,
+                "overlap_comm": True,
+                "contiguous_gradients": True,
+                "reduce_bucket_size": self.config.get("reduce_bucket_size", 5e8),
+                "stage3_prefetch_bucket_size": self.config.get("stage3_prefetch_bucket_size", 5e8),
+                "stage3_param_persistence_threshold": self.config.get("stage3_param_persistence_threshold", 1e6),
+            } if self.config.get("zero_stage", 2) > 0 else None,
+            "gradient_clipping": self.config.get("gradient_clipping", 1.0),
+            "steps_per_print": self.config.get("steps_per_print", 100),
+            "wall_clock_breakdown": False,
+        }
+    
+    def _setup_dataloader(
+        self, 
+        dataset: Optional[torch.utils.data.Dataset],
+        is_train: bool = True,
+    ) -> Optional[torch.utils.data.DataLoader]:
+        """Set up data loader for training or evaluation."""
+        if dataset is None:
+            return None
+        
+        batch_size = (
+            self.config.get("train_batch_size", 32) 
+            if is_train 
+            else self.config.get("eval_batch_size", 32)
+        )
+        
+        # Adjust batch size for gradient accumulation
+        batch_size = batch_size // self.deepspeed_config.get("gradient_accumulation_steps", 1)
+        
+        # Create sampler for distributed training
+        sampler = torch.utils.data.distributed.DistributedSampler(
+            dataset,
+            num_replicas=dist.get_world_size(),
+            rank=dist.get_rank(),
+            shuffle=is_train,
+        )
+        
+        # Create data loader
+        return torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            sampler=sampler,
+            num_workers=self.config.get("num_workers", 4),
+            pin_memory=True,
+            drop_last=is_train,
+        )
+    
+    def train(
+        self,
+        num_epochs: int,
+        eval_steps: Optional[int] = None,
+        save_steps: Optional[int] = None,
+        log_steps: int = 10,
+        compute_metrics: Optional[Callable] = None,
+    ) -> Dict[str, float]:
+        """
+        Train the model.
+        
+        Args:
+            num_epochs: Number of epochs to train
+            eval_steps: Number of steps between evaluations
+            save_steps: Number of steps between saving checkpoints
+            log_steps: Number of steps between logging
+            compute_metrics: Function to compute evaluation metrics
+        
+        Returns:
+            Dictionary of evaluation metrics
+        """
+        if self.train_dataloader is None:
+            raise ValueError("Training dataset is not provided")
+        
+        # Total training steps
+        total_steps = len(self.train_dataloader) * num_epochs
+        
+        logger.info(f"Starting training for {num_epochs} epochs ({total_steps} steps)")
+        
+        # Training loop
+        for epoch in range(num_epochs):
+            self.epoch = epoch
+            self.train_dataloader.sampler.set_epoch(epoch)
+            
+            self.model_engine.train()
+            
+            for step, batch in enumerate(self.train_dataloader):
+                # Move batch to device
+                batch = {k: v.to(self.model_engine.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+                
+                # Forward pass
+                outputs = self.model_engine(**batch)
+                loss = outputs["loss"] if "loss" in outputs else outputs[0]
+                
+                # Backward pass
+                self.model_engine.backward(loss)
+                
+                # Update weights
+                self.model_engine.step()
+                
+                # Update global step
+                self.global_step += 1
+                
+                # Log progress
+                if self.global_step % log_steps == 0:
+                    logger.info(
+                        f"Epoch: {epoch}/{num_epochs} | "
+                        f"Step: {self.global_step}/{total_steps} | "
+                        f"Loss: {loss.item():.4f}"
+                    )
+                
+                # Evaluate model
+                if eval_steps is not None and self.global_step % eval_steps == 0:
+                    metrics = self.evaluate(compute_metrics)
+                    
+                    # Save best model
+                    if metrics is not None and "eval_loss" in metrics:
+                        if metrics["eval_loss"] < self.best_metric:
+                            self.best_metric = metrics["eval_loss"]
+                            self.save_checkpoint(f"best_model")
+                            logger.info(f"New best model saved with eval_loss: {self.best_metric:.4f}")
+                
+                # Save checkpoint
+                if save_steps is not None and self.global_step % save_steps == 0:
+                    self.save_checkpoint(f"checkpoint-{self.global_step}")
+            
+            # Save checkpoint at the end of each epoch
+            self.save_checkpoint(f"checkpoint-epoch-{epoch}")
+        
+        # Final evaluation
+        metrics = self.evaluate(compute_metrics)
+        
+        # Save final model
+        self.save_checkpoint("final_model")
+        
+        return metrics
+    
+    def evaluate(
+        self,
+        compute_metrics: Optional[Callable] = None,
+    ) -> Optional[Dict[str, float]]:
+        """
+        Evaluate the model.
+        
+        Args:
+            compute_metrics: Function to compute evaluation metrics
+        
+        Returns:
+            Dictionary of evaluation metrics
+        """
+        if self.eval_dataloader is None:
+            logger.warning("Evaluation dataset is not provided")
+            return None
+        
+        logger.info("Starting evaluation")
+        
+        self.model_engine.eval()
+        
+        all_losses = []
+        all_preds = []
+        all_labels = []
+        
+        with torch.no_grad():
+            for batch in self.eval_dataloader:
+                # Move batch to device
+                batch = {k: v.to(self.model_engine.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+                
+                # Forward pass
+                outputs = self.model_engine(**batch)
+                
+                # Get loss
+                if "loss" in outputs:
+                    loss = outputs["loss"]
+                    all_losses.append(loss.item())
+                
+                # Get predictions and labels for metrics
+                if compute_metrics is not None:
+                    if "logits" in outputs:
+                        preds = outputs["logits"]
+                    elif "contrastive_embeddings" in outputs:
+                        preds = outputs["contrastive_embeddings"]
+                    else:
+                        preds = outputs[0]
+                    
+                    all_preds.append(preds.cpu())
+                    
+                    if "labels" in batch:
+                        all_labels.append(batch["labels"].cpu())
+        
+        # Compute average loss
+        eval_loss = sum(all_losses) / len(all_losses) if all_losses else float("nan")
+        
+        logger.info(f"Evaluation loss: {eval_loss:.4f}")
+        
+        # Compute additional metrics
+        metrics = {"eval_loss": eval_loss}
+        
+        if compute_metrics is not None and all_preds and all_labels:
+            # Concatenate predictions and labels
+            all_preds = torch.cat(all_preds, dim=0)
+            all_labels = torch.cat(all_labels, dim=0)
+            
+            # Compute metrics
+            additional_metrics = compute_metrics(all_preds, all_labels)
+            metrics.update(additional_metrics)
+            
+            # Log metrics
+            for name, value in additional_metrics.items():
+                logger.info(f"Evaluation {name}: {value:.4f}")
+        
+        return metrics
+    
+    def save_checkpoint(self, tag: str) -> None:
+        """
+        Save model checkpoint.
+        
+        Args:
+            tag: Tag for the checkpoint
+        """
+        output_dir = os.path.join(self.output_dir, tag)
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Save DeepSpeed checkpoint
+        self.model_engine.save_checkpoint(output_dir)
+        
+        logger.info(f"Model checkpoint saved to {output_dir}")
+        
+        # If we're using ZeRO-3, also save a consolidated FP32 checkpoint
+        if self.deepspeed_config.get("zero_optimization", {}).get("stage", 0) == 3:
+            fp32_output_dir = os.path.join(output_dir, "fp32")
+            os.makedirs(fp32_output_dir, exist_ok=True)
+            
+            # Get consolidated state dict
+            state_dict = get_fp32_state_dict_from_zero_checkpoint(output_dir)
+            
+            # Save consolidated checkpoint
+            torch.save(state_dict, os.path.join(fp32_output_dir, "pytorch_model.bin"))
+            
+            logger.info(f"Consolidated FP32 model saved to {fp32_output_dir}")
+    
+    def load_checkpoint(self, checkpoint_dir: str, load_optimizer_states: bool = True) -> None:
+        """
+        Load model checkpoint.
+        
+        Args:
+            checkpoint_dir: Directory containing the checkpoint
+            load_optimizer_states: Whether to load optimizer states
+        """
+        # Load DeepSpeed checkpoint
+        _, client_state = self.model_engine.load_checkpoint(
+            checkpoint_dir,
+            load_optimizer_states=load_optimizer_states,
+        )
+        
+        # Update global step and epoch from checkpoint
+        if client_state is not None:
+            self.global_step = client_state.get("global_step", self.global_step)
+            self.epoch = client_state.get("epoch", self.epoch)
+            self.best_metric = client_state.get("best_metric", self.best_metric)
+        
+        logger.info(f"Model checkpoint loaded from {checkpoint_dir}")
+        logger.info(f"Resuming from global step {self.global_step}, epoch {self.epoch}")
+```
+
+### 6. Integration with Langchain and DSPy
+
+```python
+# mmrl/utils/neural_symbolic/dspy_integration.py
+
+import os
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import dspy
+import numpy as np
+import torch
+from langchain.llms import HuggingFacePipeline
+from langchain.embeddings.base import Embeddings
+
+from mmrl.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+class MultiModalEmbeddings(Embeddings):
+    """
+    Multimodal embedding wrapper for Langchain.
+    
+    Allows the model's embeddings to be used within the Langchain ecosystem.
+    """
+    
+    def __init__(
+        self,
+        model,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        batch_size: int = 32,
+        text_processor=None,
+        image_processor=None,
+        audio_processor=None,
+        video_processor=None,
+    ):
+        """Initialize multimodal embeddings."""
+        self.model = model
+        self.device = device
+        self.batch_size = batch_size
+        self.text_processor = text_processor
+        self.image_processor = image_processor
+        self.audio_processor = audio_processor
+        self.video_processor = video_processor
+        
+        # Move model to device
+        self.model.to(self.device)
+        self.model.eval()
+    
+    def embed_documents(self, documents: List[str]) -> List[List[float]]:
+        """Embed documents."""
+        embeddings = []
+        
+        # Process in batches to avoid OOM
+        for i in range(0, len(documents), self.batch_size):
+            batch = documents[i:i + self.batch_size]
+            
+            # Process text
+            inputs = self._process_text_batch(batch)
+            
+            # Generate embeddings
+            with torch.no_grad():
+                outputs = self.model(text=inputs)
+                batch_embeddings = outputs["contrastive_embeddings"].cpu().numpy()
+            
+            embeddings.extend(batch_embeddings.tolist())
+        
+        return embeddings
+    
+    def embed_query(self, query: str) -> List[float]:
+        """Embed query."""
+        # Process text
+        inputs = self._process_text_batch([query])
+        
+        # Generate embedding
+        with torch.no_grad():
+            outputs = self.model(text=inputs)
+            embedding = outputs["contrastive_embeddings"][0].cpu().numpy()
+        
+        return embedding.tolist()
+    
+    def _process_text_batch(self, texts: List[str]) -> Dict[str, torch.Tensor]:
+        """Process a batch of text inputs."""
+        if self.text_processor is None:
+            raise ValueError("Text processor is required but not provided")
+        
+        # Process each text
+        processed = [self.text_processor(text) for text in texts]
+        
+        # Collate into batch
+        batch = {
+            "input_ids": torch.stack([p["input_ids"] for p in processed]).to(self.device),
+            "attention_mask": torch.stack([p["attention_mask"] for p in processed]).to(self.device),
+        }
+        
+        return batch
+    
+    def embed_image(self, image_path: str) -> List[float]:
+        """Embed an image."""
+        if self.image_processor is None:
+            raise ValueError("Image processor is required but not provided")
+        
+        # Process image
+        image = self.image_processor(image_path)
+        image_tensor = {
+            "pixel_values": torch.tensor(image["pixel_values"]).unsqueeze(0).to(self.device),
+        }
+        
+        # Generate embedding
+        with torch.no_grad():
+            outputs = self.model(images=image_tensor)
+            embedding = outputs["contrastive_embeddings"][0].cpu().numpy()
+        
+        return embedding.tolist()
+    
+    def embed_audio(self, audio_path: str) -> List[float]:
+        """Embed an audio file."""
+        if self.audio_processor is None:
+            raise ValueError("Audio processor is required but not provided")
+        
+        # Process audio
+        audio = self.audio_processor(audio_path)
+        audio_tensor = {
+            "features": torch.tensor(audio["features"]).unsqueeze(0).to(self.device),
+        }
+        
+        # Generate embedding
+        with torch.no_grad():
+            outputs = self.model(audio=audio_tensor)
+            embedding = outputs["contrastive_embeddings"][0].cpu().numpy()
+        
+        return embedding.tolist()
+    
+    def embed_video(self, video_path: str) -> List[float]:
+        """Embed a video file."""
+        if self.video_processor is None:
+            raise ValueError("Video processor is required but not provided")
+        
+        # Process video
+        video = self.video_processor(video_path)
+        video_tensor = {
+            "frames": torch.tensor(video["frames"]).unsqueeze(0).to(self.device),
+        }
+        
+        # Generate embedding
+        with torch.no_grad():
+            outputs = self.model(video=video_tensor)
+            embedding = outputs["contrastive_embeddings"][0].cpu().numpy()
+        
+        return embedding.tolist()
+
+
+class MultiModalDSPyModule(dspy.Module):
+    """
+    DSPy module for multimodal tasks.
+    
+    Integrates multimodal embeddings with DSPy's neural-symbolic programming.
+    """
+    
+    def __init__(
+        self,
+        model,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        llm=None,
+        text_processor=None,
+        image_processor=None,
+        audio_processor=None,
+        video_processor=None,
+        embedding_dim: int = 512,
+    ):
+        """Initialize the multimodal DSPy module."""
+        super().__init__()
+        
+        # Set up multimodal model
+        self.model = model
+        self.device = device
+        self.model.to(self.device)
+        self.model.eval()
+        
+        # Set up processors
+        self.text_processor = text_processor
+        self.image_processor = image_processor
+        self.audio_processor = audio_processor
+        self.video_processor = video_processor
+        
+        # Set up LLM if provided
+        self.llm = llm
+        
+        # Set up embeddings for retrieval
+        self.embedding_dim = embedding_dim
+        self.embeddings = MultiModalEmbeddings(
+            model=model,
+            device=device,
+            text_processor=text_processor,
+            image_processor=image_processor,
+            audio_processor=audio_processor,
+            video_processor=video_processor,
+        )
+    
+    def generate_training_examples(
+        self,
+        num_examples: int = 100,
+        prompt_template: str = "Generate a {modality} description for a {topic} task.",
+        topics: Optional[List[str]] = None,
+        modalities: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate training examples using the LLM.
+        
+        Args:
+            num_examples: Number of examples to generate
+            prompt_template: Template for prompts
+            topics: List of topics to choose from
+            modalities: List of modalities to include
+        
+        Returns:
+            List of training examples
+        """
+        if self.llm is None:
+            raise ValueError("LLM is required for generating training examples")
+        
+        # Default topics and modalities
+        topics = topics or [
+            "cooking", "sports", "technology", "music", "art", "travel",
+            "science", "history", "nature", "education"
+        ]
+        modalities = modalities or ["text", "image", "audio", "video"]
+        
+        examples = []
+        
+        for _ in range(num_examples):
+            topic = np.random.choice(topics)
+            modality = np.random.choice(modalities)
+            
+            prompt = prompt_template.format(modality=modality, topic=topic)
+            response = self.llm(prompt)
+            
+            example = {
+                "topic": topic,
+                "modality": modality,
+                "description": response,
+            }
+            examples.append(example)
+        
+        return examples
+    
+    def evaluate_embedding_quality(
+        self,
+        examples: List[Dict[str, Any]],
+        similarity_threshold: float = 0.7,
+    ) -> Dict[str, float]:
+        """
+        Evaluate the quality of embeddings using generated examples.
+        
+        Args:
+            examples: List of examples to evaluate
+            similarity_threshold: Threshold for similarity
+        
+        Returns:
+            Dictionary of evaluation metrics
+        """
+        # Embed all examples
+        embeddings = []
+        modalities = []
+        topics = []
+        
+        for example in examples:
+            # Embed description
+            embedding = self.embeddings.embed_query(example["description"])
+            embeddings.append(embedding)
+            modalities.append(example["modality"])
+            topics.append(example["topic"])
+        
+        # Convert to numpy arrays
+        embeddings = np.array(embeddings)
+        
+        # Compute similarity matrix
+        similarity_matrix = np.matmul(embeddings, embeddings.T)
+        
+        # Compute metrics
+        topic_coherence = self._compute_topic_coherence(similarity_matrix, topics)
+        modality_coherence = self._compute_modality_coherence(similarity_matrix, modalities)
+        
+        # Compute overall quality score
+        quality_score = (topic_coherence + modality_coherence) / 2
+        
+        return {
+            "topic_coherence": topic_coherence,
+            "modality_coherence": modality_coherence,
+            "quality_score": quality_score,
+        }
+    
+    def _compute_topic_coherence(
+        self,
+        similarity_matrix: np.ndarray,
+        topics: List[str],
+    ) -> float:
+        """Compute topic coherence from similarity matrix."""
+        topic_set = set(topics)
+        num_topics = len(topic_set)
+        
+        # Compute average similarity for same topic
+        same_topic_sim = 0.0
+        same_topic_count = 0
+        
+        # Compute average similarity for different topics
+        diff_topic_sim = 0.0
+        diff_topic_count = 0
+        
+        for i in range(len(topics)):
+            for j in range(i + 1, len(topics)):
+                if topics[i] == topics[j]:
+                    same_topic_sim += similarity_matrix[i, j]
+                    same_topic_count += 1
+                else:
+                    diff_topic_sim += similarity_matrix[i, j]
+                    diff_topic_count += 1
+        
+        # Compute averages
+        avg_same_topic = same_topic_sim / same_topic_count if same_topic_count > 0 else 0.0
+        avg_diff_topic = diff_topic_sim / diff_topic_count if diff_topic_count > 0 else 0.0
+        
+        # Compute coherence score (higher is better)
+        coherence = avg_same_topic - avg_diff_topic
+        
+        # Normalize to [0, 1] range assuming coherence in [-1, 1]
+        normalized_coherence = (coherence + 1) / 2
+        
+        return normalized_coherence
+    
+    def _compute_modality_coherence(
+        self,
+        similarity_matrix: np.ndarray,
+        modalities: List[str],
+    ) -> float:
+        """Compute modality coherence from similarity matrix."""
+        modality_set = set(modalities)
+        num_modalities = len(modality_set)
+        
+        # Compute average similarity for same modality
+        same_modality_sim = 0.0
+        same_modality_count = 0
+        
+        # Compute average similarity for different modalities
+        diff_modality_sim = 0.0
+        diff_modality_count = 0
+        
+        for i in range(len(modalities)):
+            for j in range(i + 1, len(modalities)):
+                if modalities[i] == modalities[j]:
+                    same_modality_sim += similarity_matrix[i, j]
+                    same_modality_count += 1
+                else:
+                    diff_modality_sim += similarity_matrix[i, j]
+                    diff_modality_count += 1
+        
+        # Compute averages
+        avg_same_modality = same_modality_sim / same_modality_count if same_modality_count > 0 else 0.0
+        avg_diff_modality = diff_modality_sim / diff_modality_count if diff_modality_count > 0 else 0.0
+        
+        # Compute coherence score (higher is better)
+        coherence = avg_same_modality - avg_diff_modality
+        
+        # Normalize to [0, 1] range assuming coherence in [-1, 1]
+        normalized_coherence = (coherence + 1) / 2
+        
+        return normalized_coherence
+    
+    def optimize_embeddings(
+        self,
+        examples: List[Dict[str, Any]],
+        num_iterations: int = 5,
+    ) -> Dict[str, float]:
+        """
+        Optimize embeddings using neural-symbolic feedback loop.
+        
+        Args:
+            examples: List of examples to optimize
+            num_iterations: Number of optimization iterations
+        
+        Returns:
+            Dictionary of final evaluation metrics
+        """
+        best_metrics = self.evaluate_embedding_quality(examples)
+        logger.info(f"Initial embedding quality: {best_metrics}")
+        
+        for iteration in range(num_iterations):
+            logger.info(f"Optimization iteration {iteration + 1}/{num_iterations}")
+            
+            # Find examples with poor embedding quality
+            poor_examples = self._identify_poor_embeddings(examples)
+            
+            if not poor_examples:
+                logger.info("No poor embeddings found. Optimization complete.")
+                break
+            
+            # Generate new examples to replace poor ones
+            new_examples = self.generate_training_examples(len(poor_examples))
+            
+            # Replace poor examples
+            for i, example_idx in enumerate(poor_examples):
+                if i < len(new_examples):
+                    examples[example_idx] = new_examples[i]
+            
+            # Evaluate new embedding quality
+            metrics = self.evaluate_embedding_quality(examples)
+            logger.info(f"Iteration {iteration + 1} metrics: {metrics}")
+            
+            # Update best metrics
+            if metrics["quality_score"] > best_metrics["quality_score"]:
+                best_metrics = metrics
+        
+        return best_metrics
+    
+    def _identify_poor_embeddings(
+        self,
+        examples: List[Dict[str, Any]],
+        threshold: float = 0.5,
+        max_poor: int = 10,
+    ) -> List[int]:
+        """
+        Identify examples with poor embedding quality.
+        
+        Args:
+            examples: List of examples to evaluate
+            threshold: Threshold for poor quality
+            max_poor: Maximum number of poor examples to return
+        
+        Returns:
+            List of indices of poor examples
+        """
+        # Embed all examples
+        embeddings = []
+        modalities = []
+        topics = []
+        
+        for example in examples:
+            embedding = self.embeddings.embed_query(example["description"])
+            embeddings.append(embedding)
+            modalities.append(example["modality"])
+            topics.append(example["topic"])
+        
+        # Convert to numpy arrays
+        embeddings = np.array(embeddings)
+        
+        # Compute similarity matrix
+        similarity_matrix = np.matmul(embeddings, embeddings.T)
+        
+        # Compute quality scores for each example
+        quality_scores = []
+        
+        for i in range(len(examples)):
+            # Get similarities for this example
+            similarities = similarity_matrix[i]
+            
+            # Get same topic and same modality indices
+            same_topic_idx = [j for j in range(len(topics)) if j != i and topics[j] == topics[i]]
+            same_modality_idx = [j for j in range(len(modalities)) if j != i and modalities[j] == modalities[i]]
+            
+            # Get different topic and different modality indices
+            diff_topic_idx = [j for j in range(len(topics)) if j != i and topics[j] != topics[i]]
+            diff_modality_idx = [j for j in range(len(modalities)) if j != i and modalities[j] != modalities[i]]
+            
+            # Compute average similarities
+            avg_same_topic = np.mean(similarities[same_topic_idx]) if same_topic_idx else 0.0
+            avg_diff_topic = np.mean(similarities[diff_topic_idx]) if diff_topic_idx else 0.0
+            avg_same_modality = np.mean(similarities[same_modality_idx]) if same_modality_idx else 0.0
+            avg_diff_modality = np.mean(similarities[diff_modality_idx]) if diff_modality_idx else 0.0
+            
+            # Compute topic and modality coherence
+            topic_coherence = avg_same_topic - avg_diff_topic
+            modality_coherence = avg_same_modality - avg_diff_modality
+            
+            # Normalize to [0, 1] range
+            normalized_topic_coherence = (topic_coherence + 1) / 2
+            normalized_modality_coherence = (modality_coherence + 1) / 2
+            
+            # Compute quality score
+            quality_score = (normalized_topic_coherence + normalized_modality_coherence) / 2
+            quality_scores.append(quality_score)
+        
+        # Find examples with poor quality
+        poor_indices = [i for i, score in enumerate(quality_scores) if score < threshold]
+        
+        # Sort by quality (worst first) and limit to max_poor
+        poor_indices.sort(key=lambda i: quality_scores[i])
+        poor_indices = poor_indices[:max_poor]
+        
+        return poor_indices
+```
+
+### 7. Model Distillation
+
+```python
+# mmrl/modeling/distillation/knowledge_distillation.py
+
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from mmrl.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+class DistillationTrainer:
+    """
+    Trainer for knowledge distillation from a teacher model to a student model.
+    
+    Implements various distillation techniques to transfer knowledge from a 
+    large multimodal model to a smaller, more efficient one.
+    """
+    
+    def __init__(
+        self,
+        teacher_model: nn.Module,
+        student_model: nn.Module,
+        config: Dict[str, Any],
+        train_dataloader: torch.utils.data.DataLoader,
+        eval_dataloader: Optional[torch.utils.data.DataLoader] = None,
+        optimizer: Optional[torch.optim.Optimizer] = None,
+        scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        output_dir: str = "outputs",
+    ):
+        """
+        Initialize the distillation trainer.
+        
+        Args:
+            teacher_model: Teacher model
+            student_model: Student model
+            config: Training configuration
+            train_dataloader: Training data loader
+            eval_dataloader: Evaluation data loader
+            optimizer: Optimizer for student model
+            scheduler: Learning rate scheduler
+            device: Device to use for training
+            output_dir: Output directory for checkpoints
+        """
+        self.teacher_model = teacher_model
+        self.student_model = student_model
+        self.config = config
+        self.train_dataloader = train_dataloader
+        self.eval_dataloader = eval_dataloader
+        self.device = device
+        self.output_dir = output_dir
+        
+        # Set models to appropriate modes
+        self.teacher_model.to(device)
+        self.student_model.to(device)
+        self.teacher_model.eval()  # Teacher is always in eval mode
+        
+        # Create optimizer if not provided
+        self.optimizer = optimizer or torch.optim.AdamW(
+            self.student_model.parameters(),
+            lr=config.get("learning_rate", 1e-4),
+            weight_decay=config.get("weight_decay", 0.01),
+        )
+        
+        # Create scheduler if not provided
+        self.scheduler = scheduler
+        if self.scheduler is None and config.get("use_scheduler", True):
+            self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer,
+                T_max=config.get("num_epochs", 10) * len(self.train_dataloader),
+                eta_min=config.get("min_learning_rate", 1e-6),
+            )
+        
+        # Set up loss weights
+        self.kd_loss_weight = config.get("kd_loss_weight", 0.5)
+        self.task_loss_weight = config.get("task_loss_weight", 0.5)
+        self.feature_loss_weight = config.get("feature_loss_weight", 0.1)
+        self.attention_loss_weight = config.get("attention_loss_weight", 0.1)
+        
+        # Track training progress
+        self.global_step = 0
+        self.epoch = 0
+        self.best_metric = float("inf")
+        
+        # Set temperature for distillation
+        self.temperature = config.get("temperature", 2.0)
+    
+    def train(
+        self,
+        num_epochs: int,
+        eval_steps: Optional[int] = None,
+        save_steps: Optional[int] = None,
+        log_steps: int = 10,
+        compute_metrics: Optional[Callable] = None,
+    ) -> Dict[str, float]:
+        """
+        Train the student model via knowledge distillation.
+        
+        Args:
+            num_epochs: Number of epochs to train
+            eval_steps: Number of steps between evaluations
+            save_steps: Number of steps between saving checkpoints
+            log_steps: Number of steps between logging
+            compute_metrics: Function to compute evaluation metrics
+        
+        Returns:
+            Dictionary of evaluation metrics
+        """
+        # Total training steps
+        total_steps = len(self.train_dataloader) * num_epochs
+        
+        logger.info(f"Starting distillation for {num_epochs} epochs ({total_steps} steps)")
+        
+        # Training loop
+        for epoch in range(num_epochs):
+            self.epoch = epoch
+            
+            self.student_model.train()
+            self.teacher_model.eval()
+            
+            for step, batch in enumerate(self.train_dataloader):
+                # Move batch to device
+                batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+                
+                # Forward pass - teacher model
+                with torch.no_grad():
+                    teacher_outputs = self.teacher_model(**batch)
+                
+                # Forward pass - student model
+                student_outputs = self.student_model(**batch)
+                
+                # Compute distillation loss
+                loss = self.compute_distillation_loss(
+                    teacher_outputs=teacher_outputs,
+                    student_outputs=student_outputs,
+                    batch=batch,
+                )
+                
+                # Backward pass
+                self.optimizer.zero_grad()
+                loss.backward()
+                
+                # Gradient clipping
+                if self.config.get("gradient_clipping", 0.0) > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.student_model.parameters(),
+                        self.config.get("gradient_clipping"),
+                    )
+                
+                # Update weights
+                self.optimizer.step()
+                
+                # Update scheduler
+                if self.scheduler is not None:
+                    self.scheduler.step()
+                
+                # Update global step
+                self.global_step += 1
+                
+                # Log progress
+                if self.global_step % log_steps == 0:
+                    logger.info(
+                        f"Epoch: {epoch}/{num_epochs} | "
+                        f"Step: {self.global_step}/{total_steps} | "
+                        f"Loss: {loss.item():.4f}"
+                    )
+                
+                # Evaluate model
+                if eval_steps is not None and self.global_step % eval_steps == 0:
+                    metrics = self.evaluate(compute_metrics)
+                    
+                    # Save best model
+                    if metrics is not None and "eval_loss" in metrics:
+                        if metrics["eval_loss"] < self.best_metric:
+                            self.best_metric = metrics["eval_loss"]
+                            self.save_checkpoint(f"best_model")
+                            logger.info(f"New best model saved with eval_loss: {self.best_metric:.4f}")
+                
+                # Save checkpoint
+                if save_steps is not None and self.global_step % save_steps == 0:
+                    self.save_checkpoint(f"checkpoint-{self.global_step}")
+            
+            # Save checkpoint at the end of each epoch
+            self.save_checkpoint(f"checkpoint-epoch-{epoch}")
+        
+        # Final evaluation
+        metrics = self.evaluate(compute_metrics)
+        
+        # Save final model
+        self.save_checkpoint("final_model")
+        
+        return metrics
+    
+    def compute_distillation_loss(
+        self,
+        teacher_outputs: Dict[str, torch.Tensor],
+        student_outputs: Dict[str, torch.Tensor],
+        batch: Dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        """
+        Compute the distillation loss.
+        
+        Combines several loss components:
+        - Embedding distillation loss
+        - Task-specific loss
+        - Feature distillation loss
+        - Attention distillation loss
+        
+        Args:
+            teacher_outputs: Outputs from teacher model
+            student_outputs: Outputs from student model
+            batch: Input batch
+        
+        Returns:
+            Total distillation loss
+        """
+        # Initialize total loss
+        total_loss = 0.0
+        
+        # 1. Embedding distillation loss (KL divergence)
+        if "contrastive_embeddings" in teacher_outputs and "contrastive_embeddings" in student_outputs:
+            teacher_embeddings = teacher_outputs["contrastive_embeddings"]
+            student_embeddings = student_outputs["contrastive_embeddings"]
+            
+            # Normalize embeddings
+            teacher_embeddings = F.normalize(teacher_embeddings, p=2, dim=1)
+            student_embeddings = F.normalize(student_embeddings, p=2, dim=1)
+            
+            # Compute similarity matrices
+            teacher_sim = torch.matmul(teacher_embeddings, teacher_embeddings.t()) / self.temperature
+            student_sim = torch.matmul(student_embeddings, student_embeddings.t()) / self.temperature
+            
+            # Apply softmax
+            teacher_prob = F.softmax(teacher_sim, dim=1)
+            student_prob = F.log_softmax(student_sim, dim=1)
+            
+            # Compute KL divergence
+            kd_loss = F.kl_div(student_prob, teacher_prob, reduction="batchmean") * (self.temperature ** 2)
+            total_loss += self.kd_loss_weight * kd_loss
+        
+        # 2. Task-specific loss
+        if "loss" in student_outputs:
+            task_loss = student_outputs["loss"]
+            total_loss += self.task_loss_weight * task_loss
+        elif "generative_logits" in student_outputs and "labels" in batch:
+            # Compute cross-entropy loss for generative tasks
+            logits = student_outputs["generative_logits"].view(-1, student_outputs["generative_logits"].size(-1))
+            labels = batch["labels"].view(-1)
+            task_loss = F.cross_entropy(logits, labels)
+            total_loss += self.task_loss_weight * task_loss
+        
+        # 3. Feature distillation loss
+        if "modality_encodings" in teacher_outputs and "modality_encodings" in student_outputs:
+            teacher_encodings = teacher_outputs["modality_encodings"]
+            student_encodings = student_outputs["modality_encodings"]
+            
+            feature_loss = 0.0
+            num_features = 0
+            
+            # Compute MSE loss for each modality
+            for modality in teacher_encodings:
+                if modality in student_encodings:
+                    teacher_feat = teacher_encodings[modality]
+                    student_feat = student_encodings[modality]
+                    
+                    # Handle dimension mismatch with projection
+                    if teacher_feat.shape[-1] != student_feat.shape[-1]:
+                        # Project to smaller dimension
+                        if teacher_feat.shape[-1] > student_feat.shape[-1]:
+                            projection = getattr(self, f"{modality}_projection", None)
+                            if projection is None:
+                                projection = nn.Linear(teacher_feat.shape[-1], student_feat.shape[-1]).to(self.device)
+                                setattr(self, f"{modality}_projection", projection)
+                            teacher_feat = projection(teacher_feat)
+                        else:
+                            projection = getattr(self, f"{modality}_projection", None)
+                            if projection is None:
+                                projection = nn.Linear(student_feat.shape[-1], teacher_feat.shape[-1]).to(self.device)
+                                setattr(self, f"{modality}_projection", projection)
+                            student_feat = projection(student_feat)
+                    
+                    # Compute MSE loss
+                    feat_loss = F.mse_loss(student_feat, teacher_feat)
+                    feature_loss += feat_loss
+                    num_features += 1
+            
+            if num_features > 0:
+                feature_loss /= num_features
+                total_loss += self.feature_loss_weight * feature_loss
+        
+        # 4. Attention distillation loss
+        if "attention_weights" in teacher_outputs and "attention_weights" in student_outputs:
+            teacher_attn = teacher_outputs["attention_weights"]
+            student_attn = student_outputs["attention_weights"]
+            
+            attention_loss = 0.0
+            num_attention_layers = 0
+            
+            # Compute MSE loss for attention weights
+            for layer in teacher_attn:
+                if layer in student_attn:
+                    teacher_layer_attn = teacher_attn[layer]
+                    student_layer_attn = student_attn[layer]
+                    
+                    for attn_key in teacher_layer_attn:
+                        if attn_key in student_layer_attn:
+                            teacher_attn_weights = teacher_layer_attn[attn_key]
+                            student_attn_weights = student_layer_attn[attn_key]
+                            
+                            # Handle dimension mismatch by interpolation
+                            if teacher_attn_weights.shape != student_attn_weights.shape:
+                                # Interpolate attention maps to match shapes
+                                b, h, q_t, k_t = teacher_attn_weights.shape
+                                b, h, q_s, k_s = student_attn_weights.shape
+                                
+                                if q_t > q_s or k_t > k_s:
+                                    # Downsample teacher attention
+                                    teacher_attn_weights = F.interpolate(
+                                        teacher_attn_weights.view(b * h, 1, q_t, k_t),
+                                        size=(q_s, k_s),
+                                        mode="bilinear",
+                                        align_corners=False,
+                                    ).view(b, h, q_s, k_s)
+                                else:
+                                    # Upsample student attention
+                                    student_attn_weights = F.interpolate(
+                                        student_attn_weights.view(b * h, 1, q_s, k_s),
+                                        size=(q_t, k_t),
+                                        mode="bilinear",
+                                        align_corners=False,
+                                    ).view(b, h, q_t, k_t)
+                            
+                            # Compute MSE loss
+                            attn_loss = F.mse_loss(student_attn_weights, teacher_attn_weights)
+                            attention_loss += attn_loss
+                            num_attention_layers += 1
+            
+            if num_attention_layers > 0:
+                attention_loss /= num_attention_layers
+                total_loss += self.attention_loss_weight * attention_loss
+        
+        return total_loss
+    
+    def evaluate(
+        self,
+        compute_metrics: Optional[Callable] = None,
+    ) -> Optional[Dict[str, float]]:
+        """
+        Evaluate the student model.
+        
+        Args:
+            compute_metrics: Function to compute evaluation metrics
+        
+        Returns:
+            Dictionary of evaluation metrics
+        """
+        if self.eval_dataloader is None:
+            logger.warning("Evaluation dataset is not provided")
+            return None
+        
+        logger.info("Starting evaluation")
+        
+        self.student_model.eval()
+        
+        all_losses = []
+        all_preds = []
+        all_labels = []
+        
+        with torch.no_grad():
+            for batch in self.eval_dataloader:
+                # Move batch to device
+                batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+                
+                # Forward pass
+                outputs = self.student_model(**batch)
+                
+                # Get loss
+                if "loss" in outputs:
+                    loss = outputs["loss"]
+                    all_losses.append(loss.item())
+                
+                # Get predictions and labels for metrics
+                if compute_metrics is not None:
+                    if "logits" in outputs:
+                        preds = outputs["logits"]
+                    elif "contrastive_embeddings" in outputs:
+                        preds = outputs["contrastive_embeddings"]
+                    else:
+                        preds = outputs[0]
+                    
+                    all_preds.append(preds.cpu())
+                    
+                    if "labels" in batch:
+                        all_labels.append(batch["labels"].cpu())
+        
+        # Compute average loss
+        eval_loss = sum(all_losses) / len(all_losses) if all_losses else float("nan")
+        
+        logger.info(f"Evaluation loss: {eval_loss:.4f}")
+        
+        # Compute additional metrics
+        metrics = {"eval_loss": eval_loss}
+        
+        if compute_metrics is not None and all_preds and all_labels:
+            # Concatenate predictions and labels
+            all_preds = torch.cat(all_preds, dim=0)
+            all_labels = torch.cat(all_labels, dim=0)
+            
+            # Compute metrics
+            additional_metrics = compute_metrics(all_preds, all_labels)
+            metrics.update(additional_metrics)
+            
+            # Log metrics
+            for name, value in additional_metrics.items():
+                logger.info(f"Evaluation {name}: {value:.4f}")
+        
+        return metrics
+    
+    def save_checkpoint(self, tag: str) -> None:
+        """
+        Save model checkpoint.
+        
+        Args:
+            tag: Tag for the checkpoint
+        """
+        import os
+        
+        output_dir = os.path.join(self.output_dir, tag)
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Save model weights
+        torch.save(self.student_model.state_dict(), os.path.join(output_dir, "pytorch_model.bin"))
+        
+        # Save optimizer and scheduler
+        torch.save(self.optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
+        if self.scheduler is not None:
+            torch.save(self.scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+        
+        # Save training state
+        torch.save(
+            {
+                "epoch": self.epoch,
+                "global_step": self.global_step,
+                "best_metric": self.best_metric,
+            },
+            os.path.join(output_dir, "training_state.bin"),
+        )
+        
+        logger.info(f"Model checkpoint saved to {output_dir}")
+    
+    def load_checkpoint(self, checkpoint_dir: str) -> None:
+        """
+        Load model checkpoint.
+        
+        Args:
+            checkpoint_dir: Directory containing the checkpoint
+        """
+        import os
+        
+        # Load model weights
+        model_path = os.path.join(checkpoint_dir, "pytorch_model.bin")
+        self.student_model.load_state_dict(torch.load(model_path, map_location=self.device))
+        
+        # Load optimizer
+        optimizer_path = os.path.join(checkpoint_dir, "optimizer.pt")
+        if os.path.exists(optimizer_path):
+            self.optimizer.load_state_dict(torch.load(optimizer_path, map_location=self.device))
+        
+        # Load scheduler
+        scheduler_path = os.path.join(checkpoint_dir, "scheduler.pt")
+        if os.path.exists(scheduler_path) and self.scheduler is not None:
+            self.scheduler.load_state_dict(torch.load(scheduler_path, map_location=self.device))
+        
+        # Load training state
+        state_path = os.path.join(checkpoint_dir, "training_state.bin")
+        if os.path.exists(state_path):
+            state = torch.load(state_path, map_location=self.device)
+            self.epoch = state.get("epoch", 0)
+            self.global_step = state.get("global_step", 0)
+            self.best_metric = state.get("best_metric", float("inf"))
+        
+        logger.info(f"Model checkpoint loaded from {checkpoint_dir}")
+        logger.info(f"Resuming from epoch {self.epoch}, global step {self.global_step}")
+```
+
+### 8. Embedding Visualization
+
+```python
+# mmrl/utils/visualization/embedding_visualizer.py
+
+import os
+from typing import Dict, List, Optional, Tuple, Union
+
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import umap
+from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
+
+from mmrl.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+class EmbeddingVisualizer:
+    """
+    Visualize embeddings using dimensionality reduction techniques.
+    
+    Supports:
+    - PCA
+    - t-SNE
+    - UMAP
+    """
+    
+    def __init__(
+        self,
+        output_dir: str = "visualizations",
+        n_components: int = 2,
+        random_state: int = 42,
+    ):
+        """
+        Initialize the embedding visualizer.
+        
+        Args:
+            output_dir: Directory to save visualizations
+            n_components: Number of components for dimensionality reduction
+            random_state: Random state for reproducibility
+        """
+        self.output_dir = output_dir
+        self.n_components = n_components
+        self.random_state = random_state
+        
+        # Create output directory
+        os.makedirs(output_dir, exist_ok=True)
+    
+    def visualize_embeddings(
+        self,
+        embeddings: Union[np.ndarray, torch.Tensor],
+        labels: Optional[Union[np.ndarray, torch.Tensor, List]] = None,
+        metadata: Optional[Dict] = None,
+        method: str = "umap",
+        title: str = "Embedding Visualization",
+        filename: str = "embeddings",
+        cmap: str = "viridis",
+        alpha: float = 0.7,
+        figsize: Tuple[int, int] = (12, 10),
+    ) -> np.ndarray:
+        """
+        Visualize embeddings using a dimensionality reduction technique.
+        
+        Args:
+            embeddings: Embeddings to visualize
+            labels: Labels for coloring the points
+            metadata: Additional metadata for the visualization
+            method: Dimensionality reduction method ('pca', 'tsne', 'umap')
+            title: Title for the visualization
+            filename: Filename for saving the visualization
+            cmap: Colormap for the visualization
+            alpha: Alpha value for the points
+            figsize: Figure size
+        
+        Returns:
+            Reduced embeddings
+        """
+        # Convert embeddings to numpy array
+        if isinstance(embeddings, torch.Tensor):
+            embeddings = embeddings.detach().cpu().numpy()
+        
+        # Convert labels to numpy array if provided
+        if labels is not None:
+            if isinstance(labels, torch.Tensor):
+                labels = labels.detach().cpu().numpy()
+            elif isinstance(labels, list):
+                labels = np.array(labels)
+        
+        # Perform dimensionality reduction
+        reduced_embeddings = self._reduce_dimensions(embeddings, method)
+        
+        # Plot embeddings
+        self._plot_embeddings(
+            reduced_embeddings,
+            labels,
+            metadata,
+            method,
+            title,
+            filename,
+            cmap,
+            alpha,
+            figsize,
+        )
+        
+        return reduced_embeddings
+    
+    def _reduce_dimensions(
+        self,
+        embeddings: np.ndarray,
+        method: str = "umap",
+    ) -> np.ndarray:
+        """
+        Reduce the dimensionality of embeddings.
+        
+        Args:
+            embeddings: Embeddings to reduce
+            method: Dimensionality reduction method ('pca', 'tsne', 'umap')
+        
+        Returns:
+            Reduced embeddings
+        """
+        if method.lower() == "pca":
+            reducer = PCA(n_components=self.n_components, random_state=self.random_state)
+        elif method.lower() == "tsne":
+            reducer = TSNE(
+                n_components=self.n_components,
+                random_state=self.random_state,
+                n_jobs=-1,
+                perplexity=min(30, embeddings.shape[0] - 1),
+            )
+        elif method.lower() == "umap":
+            reducer = umap.UMAP(
+                n_components=self.n_components,
+                random_state=self.random_state,
+                n_neighbors=min(15, embeddings.shape[0] - 1),
+                min_dist=0.1,
+            )
+        else:
+            raise ValueError(f"Unsupported dimensionality reduction method: {method}")
+        
+        # Perform dimensionality reduction
+        reduced_embeddings = reducer.fit_transform(embeddings)
+        
+        return reduced_embeddings
+    
+    def _plot_embeddings(
+        self,
+        reduced_embeddings: np.ndarray,
+        labels: Optional[np.ndarray] = None,
+        metadata: Optional[Dict] = None,
+        method: str = "umap",
+        title: str = "Embedding Visualization",
+        filename: str = "embeddings",
+        cmap: str = "viridis",
+        alpha: float = 0.7,
+        figsize: Tuple[int, int] = (12, 10),
+    ) -> None:
+        """
+        Plot reduced embeddings.
+        
+        Args:
+            reduced_embeddings: Reduced embeddings to plot
+            labels: Labels for coloring the points
+            metadata: Additional metadata for the visualization
+            method: Dimensionality reduction method used
+            title: Title for the visualization
+            filename: Filename for saving the visualization
+            cmap: Colormap for the visualization
+            alpha: Alpha value for the points
+            figsize: Figure size
+        """
+        # Create figure
+        plt.figure(figsize=figsize)
+        
+        # Plot embeddings
+        if labels is not None:
+            # Convert categorical labels to numeric
+            if not np.issubdtype(labels.dtype, np.number):
+                unique_labels = np.unique(labels)
+                label_map = {label: i for i, label in enumerate(unique_labels)}
+                numeric_labels = np.array([label_map[label] for label in labels])
+            else:
+                numeric_labels = labels
+                unique_labels = np.unique(numeric_labels)
+            
+            # Create scatter plot with labels
+            scatter = plt.scatter(
+                reduced_embeddings[:, 0],
+                reduced_embeddings[:, 1],
+                c=numeric_labels,
+                cmap=cmap,
+                alpha=alpha,
+                s=100,
+            )
+            
+            # Add legend
+            if len(unique_labels) <= 20:  # Only add legend if not too many labels
+                plt.colorbar(scatter, label="Label")
+                
+                # Add legend if labels are categorical
+                if not np.issubdtype(labels.dtype, np.number):
+                    from matplotlib.lines import Line2D
+                    
+                    # Create legend elements
+                    legend_elements = [
+                        Line2D(
+                            [0], [0],
+                            marker="o",
+                            color="w",
+                            markerfacecolor=plt.cm.get_cmap(cmap)(i / len(unique_labels)),
+                            markersize=10,
+                            label=label,
+                        )
+                        for i, label in enumerate(unique_labels)
+                    ]
+                    
+                    # Add legend
+                    plt.legend(handles=legend_elements, title="Labels", loc="best")
+        else:
+            # Create scatter plot without labels
+            plt.scatter(
+                reduced_embeddings[:, 0],
+                reduced_embeddings[:, 1],
+                alpha=alpha,
+                s=100,
+            )
+        
+        # Add annotations if metadata is provided
+        if metadata is not None and "annotations" in metadata:
+            for i, annotation in enumerate(metadata["annotations"]):
+                plt.annotate(
+                    annotation,
+                    (reduced_embeddings[i, 0], reduced_embeddings[i, 1]),
+                    fontsize=8,
+                    alpha=0.7,
+                )
+        
+        # Add title and labels
+        plt.title(f"{title} ({method.upper()})")
+        plt.xlabel(f"Component 1")
+        plt.ylabel(f"Component 2")
+        
+        # Add grid
+        plt.grid(alpha=0.3)
+        
+        # Tight layout
+        plt.tight_layout()
+        
+        # Save figure
+        plt.savefig(
+            os.path.join(self.output_dir, f"{filename}_{method}.png"),
+            dpi=300,
+            bbox_inches="tight",
+        )
+        plt.savefig(
+            os.path.join(self.output_dir, f"{filename}_{method}.pdf"),
+            bbox_inches="tight",
+        )
+        
+        plt.close()
+    
+    def visualize_attention(
+        self,
+        attention_weights: Union[np.ndarray, torch.Tensor],
+        tokens: Optional[List[str]] = None,
+        layer: int = 0,
+        head: int = 0,
+        title: str = "Attention Visualization",
+        filename: str = "attention",
+        cmap: str = "viridis",
+        figsize: Tuple[int, int] = (12, 10),
+    ) -> None:
+        """
+        Visualize attention weights.
+        
+        Args:
+            attention_weights: Attention weights to visualize
+            tokens: Tokens for axis labels
+            layer: Layer index
+            head: Attention head index
+            title: Title for the visualization
+            filename: Filename for saving the visualization
+            cmap: Colormap for the visualization
+            figsize: Figure size
+        """
+        # Convert attention weights to numpy array
+        if isinstance(attention_weights, torch.Tensor):
+            attention_weights = attention_weights.detach().cpu().numpy()
+        
+        # Extract attention weights for the specified layer and head
+        if attention_weights.ndim == 4:  # [batch, layer, head, seq_len, seq_len]
+            attention_weights = attention_weights[0, layer, head]
+        elif attention_weights.ndim == 5:  # [batch, layer, head, seq_len, seq_len]
+            attention_weights = attention_weights[0, layer, head]
+        
+        # Create figure
+        plt.figure(figsize=figsize)
+        
+        # Plot attention heatmap
+        plt.imshow(attention_weights, cmap=cmap)
+        
+        # Add colorbar
+        plt.colorbar(label="Attention Weight")
+        
+        # Add tokens if provided
+        if tokens is not None:
+            # Limit the number of tokens to display
+            max_tokens = 50
+            if len(tokens) > max_tokens:
+                # Subsample tokens
+                indices = np.linspace(0, len(tokens) - 1, max_tokens, dtype=int)
+                tokens = [tokens[i] for i in indices]
+                attention_weights = attention_weights[indices, :][:, indices]
+            
+            plt.xticks(
+                range(len(tokens)),
+                tokens,
+                rotation=90,
+                fontsize=8,
+            )
+            plt.yticks(
+                range(len(tokens)),
+                tokens,
+                fontsize=8,
+            )
+        
+        # Add title
+        plt.title(f"{title} (Layer {layer}, Head {head})")
+        
+        # Tight layout
+        plt.tight_layout()
+        
+        # Save figure
+        plt.savefig(
+            os.path.join(self.output_dir, f"{filename}_layer{layer}_head{head}.png"),
+            dpi=300,
+            bbox_inches="tight",
+        )
+        plt.savefig(
+            os.path.join(self.output_dir, f"{filename}_layer{layer}_head{head}.pdf"),
+            bbox_inches="tight",
+        )
+        
+        plt.close()
+    
+    def visualize_modality_interactions(
+        self,
+        cross_attention_weights: Dict[str, Union[np.ndarray, torch.Tensor]],
+        modalities: List[str],
+        layer: int = 0,
+        title: str = "Modality Interactions",
+        filename: str = "modality_interactions",
+        cmap: str = "viridis",
+        figsize: Tuple[int, int] = (12, 10),
+    ) -> None:
+        """
+        Visualize cross-attention between modalities.
+        
+        Args:
+            cross_attention_weights: Dictionary of cross-attention weights
+            modalities: List of modalities
+            layer: Layer index
+            title: Title for the visualization
+            filename: Filename for saving the visualization
+            cmap: Colormap for the visualization
+            figsize: Figure size
+        """
+        # Create figure
+        plt.figure(figsize=figsize)
+        
+        # Create modality interaction matrix
+        num_modalities = len(modalities)
+        interaction_matrix = np.zeros((num_modalities, num_modalities))
+        
+        # Fill interaction matrix
+        for i, target in enumerate(modalities):
+            for j, source in enumerate(modalities):
+                key = f"{target}_to_{source}"
+                if key in cross_attention_weights:
+                    # Convert to numpy array
+                    weights = cross_attention_weights[key]
+                    if isinstance(weights, torch.Tensor):
+                        weights = weights.detach().cpu().numpy()
+                    
+                    # Extract weights for the specified layer
+                    if weights.ndim > 2:
+                        weights = weights[0, layer] if weights.ndim == 3 else weights[0, layer, 0]
+                    
+                    # Compute average attention
+                    interaction_matrix[i, j] = np.mean(weights)
+        
+        # Plot interaction heatmap
+        plt.imshow(interaction_matrix, cmap=cmap)
+        
+        # Add colorbar
+        plt.colorbar(label="Average Attention")
+        
+        # Add modality labels
+        plt.xticks(range(num_modalities), modalities, rotation=45)
+        plt.yticks(range(num_modalities), modalities)
+        
+        # Add title
+        plt.title(f"{title} (Layer {layer})")
+        
+        # Add axis labels
+        plt.xlabel("Source Modality")
+        plt.ylabel("Target Modality")
+        
+        # Tight layout
+        plt.tight_layout()
+        
+        # Save figure
+        plt.savefig(
+            os.path.join(self.output_dir, f"{filename}_layer{layer}.png"),
+            dpi=300,
+            bbox_inches="tight",
+        )
+        plt.savefig(
+            os.path.join(self.output_dir, f"{filename}_layer{layer}.pdf"),
+            bbox_inches="tight",
+        )
+        
+        plt.close()
+```
+
+### 9. Experiment Tracking with MLflow and W&B
+
+```python
+# mmrl/utils/tracking/experiment_tracker.py
+
+import os
+import socket
+import subprocess
+import time
+from typing import Any, Dict, List, Optional, Union
+
+import mlflow
+import mlflow.pytorch
+import numpy as np
+import torch
+import wandb
+from git import Repo, InvalidGitRepositoryError
+
+from mmrl.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+class ExperimentTracker:
+    """
+    Track experiments using MLflow and Weights & Biases.
+    
+    Provides unified interface for logging metrics, parameters, and artifacts
+    to both platforms for comprehensive experiment tracking.
+    """
+    
+    def __init__(
+        self,
+        experiment_name: str,
+        tracking_uri: Optional[str] = None,
+        wandb_project: Optional[str] = None,
+        wandb_entity: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+        run_name: Optional[str] = None,
+        tags: Optional[Dict[str, str]] = None,
+        use_mlflow: bool = True,
+        use_wandb: bool = True,
+    ):
+        """
+        Initialize the experiment tracker.
+        
+        Args:
+            experiment_name: Name of the experiment
+            tracking_uri: URI for MLflow tracking server
+            wandb_project: Weights & Biases project name
+            wandb_entity: Weights & Biases entity/username
+            config: Configuration parameters
+            run_name: Name for the run
+            tags: Tags for the run
+            use_mlflow: Whether to use MLflow
+            use_wandb: Whether to use Weights & Biases
+        """
+        self.experiment_name = experiment_name
+        self.config = config or {}
+        self.run_name = run_name or f"run_{int(time.time())}"
+        self.tags = tags or {}
+        self.use_mlflow = use_mlflow
+        self.use_wandb = use_wandb
+        
+        # Add system info to tags
+        self.tags.update(self._get_system_info())
+        
+        # Add git info to tags
+        self.tags.update(self._get_git_info())
+        
+        # Initialize MLflow
+        if self.use_mlflow:
+            if tracking_uri:
+                mlflow.set_tracking_uri(tracking_uri)
+            
+            mlflow.set_experiment(experiment_name)
+            self.mlflow_run = mlflow.start_run(run_name=self.run_name)
+            
+            # Log tags
+            mlflow.set_tags(self.tags)
+            
+            # Log config parameters
+            for key, value in self.config.items():
+                mlflow.log_param(key, value)
+        
+        # Initialize Weights & Biases
+        if self.use_wandb:
+            self.wandb_run = wandb.init(
+                project=wandb_project or experiment_name,
+                entity=wandb_entity,
+                name=self.run_name,
+                config=self.config,
+                tags=list(self.tags.values()),
+                reinit=True,
+            )
+    
+    def log_metric(
+        self,
+        key: str,
+        value: Union[float, int],
+        step: Optional[int] = None,
+    ) -> None:
+        """
+        Log a metric.
+        
+        Args:
+            key: Metric name
+            value: Metric value
+            step: Step number
+        """
+        if self.use_mlflow:
+            mlflow.log_metric(key, value, step=step)
+        
+        if self.use_wandb:
+            metrics = {key: value}
+            if step is not None:
+                wandb.log(metrics, step=step)
+            else:
+                wandb.log(metrics)
+    
+    def log_metrics(
+        self,
+        metrics: Dict[str, Union[float, int]],
+        step: Optional[int] = None,
+    ) -> None:
+        """
+        Log multiple metrics.
+        
+        Args:
+            metrics: Dictionary of metric names and values
+            step: Step number
+        """
+        if self.use_mlflow:
+            mlflow.log_metrics(metrics, step=step)
+        
+        if self.use_wandb:
+            if step is not None:
+                wandb.log(metrics, step=step)
+            else:
+                wandb.log(metrics)
+    
+    def log_param(self, key: str, value: Any) -> None:
+        """
+        Log a parameter.
+        
+        Args:
+            key: Parameter name
+            value: Parameter value
+        """
+        if self.use_mlflow:
+            mlflow.log_param(key, value)
+        
+        if self.use_wandb:
+            wandb.config.update({key: value})
+    
+    def log_params(self, params: Dict[str, Any]) -> None:
+        """
+        Log multiple parameters.
+        
+        Args:
+            params: Dictionary of parameter names and values
+        """
+        if self.use_mlflow:
+            mlflow.log_params(params)
+        
+        if self.use_wandb:
+            wandb.config.update(params)
+    
+    def log_artifact(
+        self,
+        local_path: str,
+        artifact_path: Optional[str] = None,
+    ) -> None:
+        """
+        Log an artifact.
+        
+        Args:
+            local_path: Local path to the artifact
+            artifact_path: Path within the artifact store
+        """
+        if self.use_mlflow:
+            mlflow.log_artifact(local_path, artifact_path)
+        
+        if self.use_wandb:
+            artifact = wandb.Artifact(
+                name=os.path.basename(local_path),
+                type=os.path.splitext(local_path)[1][1:],  # Use extension as type
+            )
+            artifact.add_file(local_path)
+            wandb.log_artifact(artifact)
+    
+    def log_figure(
+        self,
+        figure,
+        artifact_path: str,
+    ) -> None:
+        """
+        Log a matplotlib figure.
+        
+        Args:
+            figure: Matplotlib figure
+            artifact_path: Path for the figure
+        """
+        if self.use_mlflow:
+            mlflow.log_figure(figure, artifact_path)
+        
+        if self.use_wandb:
+            wandb.log({artifact_path: wandb.Image(figure)})
+    
+    def log_image(
+        self,
+        image: Union[np.ndarray, torch.Tensor],
+        artifact_path: str,
+    ) -> None:
+        """
+        Log an image.
+        
+        Args:
+            image: Image as numpy array or torch tensor
+            artifact_path: Path for the image
+        """
+        # Convert torch tensor to numpy array
+        if isinstance(image, torch.Tensor):
+            image = image.detach().cpu().numpy()
+        
+        if self.use_mlflow:
+            import matplotlib.pyplot as plt
+            
+            plt.figure(figsize=(8, 8))
+            plt.imshow(image)
+            plt.axis("off")
+            mlflow.log_figure(plt.gcf(), artifact_path)
+            plt.close()
+        
+        if self.use_wandb:
+            wandb.log({artifact_path: wandb.Image(image)})
+    
+    def log_table(
+        self,
+        data: Dict[str, List],
+        artifact_path: str,
+    ) -> None:
+        """
+        Log a table.
+        
+        Args:
+            data: Dictionary of column names and values
+            artifact_path: Path for the table
+        """
+        if self.use_mlflow:
+            import pandas as pd
+            
+            # Convert to pandas DataFrame
+            df = pd.DataFrame(data)
+            
+            # Save to CSV and log
+            csv_path = f"{artifact_path}.csv"
+            df.to_csv(csv_path, index=False)
+            mlflow.log_artifact(csv_path)
+            os.remove(csv_path)
+        
+        if self.use_wandb:
+            wandb.log({artifact_path: wandb.Table(data=data)})
+    
+    def log_model(
+        self,
+        model: torch.nn.Module,
+        artifact_path: str,
+    ) -> None:
+        """
+        Log a PyTorch model.
+        
+        Args:
+            model: PyTorch model
+            artifact_path: Path for the model
+        """
+        if self.use_mlflow:
+            mlflow.pytorch.log_model(model, artifact_path)
+        
+        if self.use_wandb:
+            # Save model to a temporary file
+            tmp_path = f"{artifact_path}.pt"
+            torch.save(model.state_dict(), tmp_path)
+            
+            # Log model
+            artifact = wandb.Artifact(
+                name=artifact_path,
+                type="model",
+            )
+            artifact.add_file(tmp_path)
+            wandb.log_artifact(artifact)
+            
+            # Clean up
+            os.remove(tmp_path)
+    
+    def log_embedding(
+        self,
+        embeddings: Union[np.ndarray, torch.Tensor],
+        metadata: Optional[List[str]] = None,
+        artifact_path: str = "embeddings",
+    ) -> None:
+        """
+        Log embeddings for visualization.
+        
+        Args:
+            embeddings: Embeddings as numpy array or torch tensor
+            metadata: Metadata for the embeddings
+            artifact_path: Path for the embeddings
+        """
+        # Convert torch tensor to numpy array
+        if isinstance(embeddings, torch.Tensor):
+            embeddings = embeddings.detach().cpu().numpy()
+        
+        if self.use_mlflow:
+            from mmrl.utils.visualization.embedding_visualizer import EmbeddingVisualizer
+            
+            # Create visualizer
+            visualizer = EmbeddingVisualizer(output_dir=".")
+            
+            # Create visualization
+            visualizer.visualize_embeddings(
+                embeddings,
+                labels=metadata,
+                method="umap",
+                title="Embeddings",
+                filename=artifact_path,
+            )
+            
+            # Log visualization
+            mlflow.log_artifact(f"{artifact_path}_umap.png")
+            
+            # Clean up
+            os.remove(f"{artifact_path}_umap.png")
+            os.remove(f"{artifact_path}_umap.pdf")
+        
+        if self.use_wandb:
+            wandb.log({
+                f"{artifact_path}_projector": wandb.Table(
+                    columns=["embedding"] + (["metadata"] if metadata else []),
+                    data=[[e] + ([m] if metadata else []) for e, m in zip(embeddings, metadata or [None] * len(embeddings))],
+                )
+            })
+    
+    def log_confusion_matrix(
+        self,
+        y_true: Union[np.ndarray, torch.Tensor, List],
+        y_pred: Union[np.ndarray, torch.Tensor, List],
+        labels: Optional[List[str]] = None,
+        artifact_path: str = "confusion_matrix",
+    ) -> None:
+        """
+        Log a confusion matrix.
+        
+        Args:
+            y_true: True labels
+            y_pred: Predicted labels
+            labels: Label names
+            artifact_path: Path for the confusion matrix
+        """
+        # Convert to numpy arrays
+        if isinstance(y_true, torch.Tensor):
+            y_true = y_true.detach().cpu().numpy()
+        if isinstance(y_pred, torch.Tensor):
+            y_pred = y_pred.detach().cpu().numpy()
+        if isinstance(y_true, list):
+            y_true = np.array(y_true)
+        if isinstance(y_pred, list):
+            y_pred = np.array(y_pred)
+        
+        from sklearn.metrics import confusion_matrix
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        
+        # Compute confusion matrix
+        cm = confusion_matrix(y_true, y_pred)
+        
+        # Plot confusion matrix
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(
+            cm,
+            annot=True,
+            fmt="d",
+            cmap="Blues",
+            xticklabels=labels,
+            yticklabels=labels,
+        )
+        plt.xlabel("Predicted")
+        plt.ylabel("True")
+        plt.title("Confusion Matrix")
+        plt.tight_layout()
+        
+        # Log figure
+        self.log_figure(plt.gcf(), artifact_path)
+        plt.close()
+    
+    def log_pr_curve(
+        self,
+        y_true: Union[np.ndarray, torch.Tensor, List],
+        y_score: Union[np.ndarray, torch.Tensor, List],
+        artifact_path: str = "pr_curve",
+    ) -> None:
+        """
+        Log a precision-recall curve.
+        
+        Args:
+            y_true: True labels
+            y_score: Predicted scores
+            artifact_path: Path for the PR curve
+        """
+        # Convert to numpy arrays
+        if isinstance(y_true, torch.Tensor):
+            y_true = y_true.detach().cpu().numpy()
+        if isinstance(y_score, torch.Tensor):
+            y_score = y_score.detach().cpu().numpy()
+        if isinstance(y_true, list):
+            y_true = np.array(y_true)
+        if isinstance(y_score, list):
+            y_score = np.array(y_score)
+        
+        from sklearn.metrics import precision_recall_curve, average_precision_score
+        import matplotlib.pyplot as plt
+        
+        # Compute precision-recall curve
+        precision, recall, _ = precision_recall_curve(y_true, y_score)
+        ap = average_precision_score(y_true, y_score)
+        
+        # Plot PR curve
+        plt.figure(figsize=(10, 8))
+        plt.plot(recall, precision, marker=".", label=f"AP={ap:.3f}")
+        plt.xlabel("Recall")
+        plt.ylabel("Precision")
+        plt.title("Precision-Recall Curve")
+        plt.legend()
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
+        
+        # Log figure
+        self.log_figure(plt.gcf(), artifact_path)
+        plt.close()
+    
+    def finish(self) -> None:
+        """End the tracking session."""
+        if self.use_mlflow:
+            mlflow.end_run()
+        
+        if self.use_wandb:
+            wandb.finish()
+    
+    def _get_system_info(self) -> Dict[str, str]:
+        """Get system information."""
+        import platform
+        import psutil
+        
+        system_info = {
+            "hostname": socket.gethostname(),
+            "os": platform.platform(),
+            "python": platform.python_version(),
+            "cpu": platform.processor(),
+            "cpu_count": str(psutil.cpu_count()),
+            "memory": f"{psutil.virtual_memory().total / (1024**3):.2f} GB",
+        }
+        
+        # Add GPU info if available
+        try:
+            if torch.cuda.is_available():
+                system_info["gpu"] = torch.cuda.get_device_name(0)
+                system_info["gpu_count"] = str(torch.cuda.device_count())
+                system_info["cuda"] = torch.version.cuda
+        except:
+            pass
+        
+        return {f"system.{k}": v for k, v in system_info.items()}
+    
+    def _get_git_info(self) -> Dict[str, str]:
+        """Get git repository information."""
+        git_info = {}
+        
+        try:
+            repo = Repo(search_parent_directories=True)
+            git_info["git.commit"] = repo.head.commit.hexsha
+            git_info["git.branch"] = repo.active_branch.name
+            
+            # Check if repo is dirty
+            git_info["git.dirty"] = str(repo.is_dirty())
+            
+            # Get remote URL
+            if len(repo.remotes) > 0:
+                git_info["git.remote"] = repo.remotes.origin.url
+        except (InvalidGitRepositoryError, Exception):
+            pass
+        
+        return git_info
+```
+
+### 10. Main Training Script
+
+```python
+# scripts/train.py
+
+import argparse
+import json
+import os
+import sys
+from typing import Dict, Any
+
+import tensorflow as tf
+import torch
+import torch.distributed as dist
+import wandb
+from torch.utils.data import DataLoader
+
+from mmrl.data.tfdata.dataset import MultiModalDatasetTF
+from mmrl.data.tfdata.torch_wrapper import TFDatasetToTorch
+from mmrl.modeling.model import MultiModalModelPyTorch
+from mmrl.training.distributed.deepspeed_trainer import DeepSpeedTrainer
+from mmrl.utils.tracking.experiment_tracker import ExperimentTracker
+from mmrl.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="Train multimodal representation learning model")
+    
+    # Configuration
+    parser.add_argument("--config", type=str, required=True, help="Path to config file")
+    parser.add_argument("--output_dir", type=str, default="outputs", help="Output directory")
+    
+    # Training parameters
+    parser.add_argument("--num_epochs", type=int, default=10, help="Number of training epochs")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    
+    # Distributed training
+    parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training")
+    parser.add_argument("--deepspeed_config", type=str, help="Path to DeepSpeed config file")
+    
+    # Experiment tracking
+    parser.add_argument("--tracking_uri", type=str, help="MLflow tracking URI")
+    parser.add_argument("--wandb_project", type=str, help="Weights & Biases project name")
+    parser.add_argument("--wandb_entity", type=str, help="Weights & Biases entity/username")
+    parser.add_argument("--experiment_name", type=str, default="mmrl", help="Experiment name")
+    
+    # Evaluation
+    parser.add_argument("--eval_steps", type=int, default=1000, help="Evaluation frequency in steps")
+    parser.add_argument("--save_steps", type=int, default=5000, help="Checkpoint saving frequency in steps")
+    
+    # Resume training
+    parser.add_argument("--resume_from", type=str, help="Resume training from checkpoint")
+    
+    return parser.parse_args()
+
+
+def set_seed(seed: int):
+    """Set random seeds for reproducibility."""
+    import random
+    import numpy as np
+    
+    random.seed(seed)
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def load_config(config_path: str) -> Dict[str, Any]:
+    """Load config from file."""
+    with open(config_path, "r") as f:
+        config = json.load(f)
+    return config
+
+
+def init_distributed():
+    """Initialize distributed training."""
+    if dist.is_available() and dist.is_initialized():
+        return
+    
+    # Check if CUDA is available
+    if not torch.cuda.is_available():
+        logger.warning("CUDA is not available. Distributed training will not be used.")
+        return
+    
+    # Initialize distributed training
+    dist.init_process_group(backend="nccl")
+    
+    # Set device
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    torch.cuda.set_device(local_rank)
+    
+    logger.info(f"Initialized distributed training with rank {dist.get_rank()}")
+
+
+def load_datasets(config: Dict[str, Any]):
+    """Load training and evaluation datasets."""
+    # Create training dataset
+    train_dataset = MultiModalDatasetTF(
+        dataset_name=config["dataset"]["name"],
+        split="train",
+        data_dir=config["dataset"]["data_dir"],
+        modalities=config["dataset"]["modalities"],
+        batch_size=config["training"]["batch_size"],
+        shuffle_buffer_size=config["dataset"].get("shuffle_buffer_size", 10000),
+    )
+    
+    # Create evaluation dataset
+    eval_dataset = None
+    if config["dataset"].get("eval_split"):
+        eval_dataset = MultiModalDatasetTF(
+            dataset_name=config["dataset"]["name"],
+            split=config["dataset"].get("eval_split", "validation"),
+            data_dir=config["dataset"]["data_dir"],
+            modalities=config["dataset"]["modalities"],
+            batch_size=config["training"].get("eval_batch_size", config["training"]["batch_size"]),
+            shuffle_buffer_size=1,
+        )
+    
+    # Wrap TensorFlow datasets with PyTorch wrapper
+    train_dataset_torch = TFDatasetToTorch(train_dataset.get_dataset())
+    eval_dataset_torch = TFDatasetToTorch(eval_dataset.get_dataset()) if eval_dataset else None
+    
+    return train_dataset_torch, eval_dataset_torch
+
+
+def create_model(config: Dict[str, Any]):
+    """Create model from config."""
+    model = MultiModalModelPyTorch(config["model"])
+    return model
+
+
+def compute_metrics(predictions, labels):
+    """Compute evaluation metrics."""
+    # Compute accuracy for classification tasks
+    if predictions.shape != labels.shape:
+        # This is a classification task
+        if predictions.dim() > 1 and predictions.shape[-1] > 1:
+            # Convert logits to predictions
+            predictions = torch.argmax(predictions, dim=-1)
+        
+        # Compute accuracy
+        accuracy = (predictions == labels).float().mean().item()
+        return {"accuracy": accuracy}
+    else:
+        # This is a regression or similarity task
+        from scipy.stats import spearmanr
+        
+        # Compute cosine similarity
+        predictions = torch.nn.functional.normalize(predictions, p=2, dim=1)
+        labels = torch.nn.functional.normalize(labels, p=2, dim=1)
+        
+        similarities = torch.matmul(predictions, labels.t()).diagonal().cpu().numpy()
+        
+        # Compute Spearman correlation
+        correlation, _ = spearmanr(similarities, similarities)
+        
+        return {"correlation": correlation}
+
+
+def main():
+    """Main training function."""
+    # Parse arguments
+    args = parse_args()
+    
+    # Set random seed
+    set_seed(args.seed)
+    
+    # Load config
+    config = load_config(args.config)
+    
+    # Initialize distributed training if needed
+    init_distributed()
+    
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Create experiment tracker
+    tracker = ExperimentTracker(
+        experiment_name=args.experiment_name,
+        tracking_uri=args.tracking_uri,
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        config=config,
+        tags={"seed": str(args.seed)},
+    )
+    
+    # Log command line arguments
+    tracker.log_params(vars(args))
+    
+    # Load datasets
+    train_dataset, eval_dataset = load_datasets(config)
+    
+    # Create model
+    model = create_model(config)
+    
+    # Initialize DeepSpeed trainer
+    deepspeed_config = load_config(args.deepspeed_config) if args.deepspeed_config else None
+    
+    trainer = DeepSpeedTrainer(
+        model=model,
+        config=config["training"],
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        local_rank=args.local_rank,
+        deepspeed_config=deepspeed_config,
+        output_dir=args.output_dir,
+    )
+    
+    # Resume training if requested
+    if args.resume_from:
+        trainer.load_checkpoint(args.resume_from)
+    
+    # Train model
+    metrics = trainer.train(
+        num_epochs=args.num_epochs,
+        eval_steps=args.eval_steps,
+        save_steps=args.save_steps,
+        compute_metrics=compute_metrics,
+    )
+    
+    # Log final metrics
+    if metrics:
+        tracker.log_metrics(metrics)
+    
+    # Finish tracking
+    tracker.finish()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+## Complete End-to-End Example
+
+Here's a complete end-to-end example of how to use this framework:
+
+```python
+# examples/train_multimodal_model.py
+
+import os
+import json
+import argparse
+from datetime import datetime
+
+import torch
+import tensorflow as tf
+import numpy as np
+
+from mmrl.modeling.model import MultiModalModelPyTorch
+from mmrl.data.tfdata.dataset import MultiModalDatasetTF
+from mmrl.data.tfdata.torch_wrapper import TFDatasetToTorch
+from mmrl.training.distributed.deepspeed_trainer import DeepSpeedTrainer
+from mmrl.utils.tracking.experiment_tracker import ExperimentTracker
+from mmrl.utils.visualization.embedding_visualizer import EmbeddingVisualizer
+from mmrl.utils.neural_symbolic.dspy_integration import MultiModalDSPyModule
+from mmrl.modeling.distillation.knowledge_distillation import DistillationTrainer
+
+
+def main():
+    """Train a multimodal representation learning model."""
+    # Parse arguments
+    parser = argparse.ArgumentParser(description="Train a multimodal model")
+    parser.add_argument("--data_dir", type=str, required=True, help="Data directory")
+    parser.add_argument("--output_dir", type=str, default="outputs", help="Output directory")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
+    parser.add_argument("--num_epochs", type=int, default=10, help="Number of epochs")
+    parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate")
+    parser.add_argument("--use_wandb", action="store_true", help="Use Weights & Biases")
+    parser.add_argument("--use_distillation", action="store_true", help="Use model distillation")
+    args = parser.parse_args()
+    
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Define model configuration
+    model_config = {
+        "text": {
+            "vocab_size": 50265,  # GPT-2 tokenizer vocabulary size
+            "hidden_size": 768,
+            "num_layers": 12,
+            "num_heads": 12,
+            "mlp_dim": 3072,
+            "dropout_rate": 0.1,
+        },
+        "image": {
+            "patch_size": 16,
+            "hidden_size": 768,
+            "num_layers": 12,
+            "num_heads": 12,
+            "mlp_dim": 3072,
+            "dropout_rate": 0.1,
+        },
+        "audio": {
+            "patch_size": 16,
+            "hidden_size": 512,
+            "num_layers": 8,
+            "num_heads": 8,
+            "mlp_dim": 2048,
+            "dropout_rate": 0.1,
+        },
+        "video": {
+            "patch_size": 16,
+            "frame_stride": 4,
+            "hidden_size": 768,
+            "num_layers": 12,
+            "num_heads": 12,
+            "mlp_dim": 3072,
+            "dropout_rate": 0.1,
+        },
+        "fusion": {
+            "hidden_size": 768,
+            "num_layers": 4,
+            "num_heads": 12,
+            "mlp_dim": 3072,
+            "dropout_rate": 0.1,
+        },
+        "heads": {
+            "hidden_size": 768,
+            "projection_dim": 512,
+            "temperature": 0.07,
+        },
+    }
+    
+    # Define training configuration
+    training_config = {
+        "batch_size": args.batch_size,
+        "learning_rate": args.learning_rate,
+        "weight_decay": 0.01,
+        "warmup_steps": 1000,
+        "gradient_clipping": 1.0,
+        "fp16": True,
+        "zero_stage": 2,
+    }
+    
+    # Define dataset configuration
+    dataset_config = {
+        "name": "webimagetext",
+        "data_dir": args.data_dir,
+        "modalities": ["text", "image"],
+        "eval_split": "validation",
+        "shuffle_buffer_size": 10000,
+    }
+    
+    # Combine configurations
+    config = {
+        "model": model_config,
+        "training": training_config,
+        "dataset": dataset_config,
+    }
+    
+    # Save configuration
+    with open(os.path.join(args.output_dir, "config.json"), "w") as f:
+        json.dump(config, f, indent=2)
+    
+    # Create experiment tracker
+    tracker = ExperimentTracker(
+        experiment_name="multimodal_representation_learning",
+        config=config,
+        run_name=f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        use_wandb=args.use_wandb,
+    )
+    
+    # Load datasets
+    print("Loading datasets...")
+    train_dataset = MultiModalDatasetTF(
+        dataset_name=dataset_config["name"],
+        split="train",
+        data_dir=dataset_config["data_dir"],
+        modalities=dataset_config["modalities"],
+        batch_size=training_config["batch_size"],
+        shuffle_buffer_size=dataset_config.get("shuffle_buffer_size", 10000),
+    )
+    
+    eval_dataset = MultiModalDatasetTF(
+        dataset_name=dataset_config["name"],
+        split=dataset_config.get("eval_split", "validation"),
+        data_dir=dataset_config["data_dir"],
+        modalities=dataset_config["modalities"],
+        batch_size=training_config["batch_size"],
+        shuffle_buffer_size=1,
+    )
+    
+    # Wrap TensorFlow datasets with PyTorch wrapper
+    train_dataset_torch = TFDatasetToTorch(train_dataset.get_dataset())
+    eval_dataset_torch = TFDatasetToTorch(eval_dataset.get_dataset())
+    
+    # Create model
+    print("Creating model...")
+    model = MultiModalModelPyTorch(model_config)
+    
+    # Train model
+    print("Training model...")
+    
+    if args.use_distillation and args.use_wandb:
+        # Load teacher model (pretrained)
+        teacher_model = MultiModalModelPyTorch(model_config)
+        teacher_checkpoint = "pretrained/teacher_model.bin"
+        
+        if os.path.exists(teacher_checkpoint):
+            teacher_model.load_state_dict(torch.load(teacher_checkpoint))
+            
+            # Initialize distillation trainer
+            trainer = DistillationTrainer(
+                teacher_model=teacher_model,
+                student_model=model,
+                config=training_config,
+                train_dataset=train_dataset_torch,
+                eval_dataset=eval_dataset_torch,
+                output_dir=args.output_dir,
+            )
+            
+            # Train with distillation
+            trainer.train(
+                num_epochs=args.num_epochs,
+                eval_steps=100,
+                save_steps=500,
+            )
+        else:
+            print(f"Teacher model checkpoint not found: {teacher_checkpoint}")
+            print("Training without distillation instead.")
+            
+            # Initialize DeepSpeed trainer
+            trainer = DeepSpeedTrainer(
+                model=model,
+                config=training_config,
+                train_dataset=train_dataset_torch,
+                eval_dataset=eval_dataset_torch,
+                output_dir=args.output_dir,
+            )
+            
+            # Train model
+            trainer.train(
+                num_epochs=args.num_epochs,
+                eval_steps=100,
+                save_steps=500,
+            )
+    else:
+        # Initialize DeepSpeed trainer
+        trainer = DeepSpeedTrainer(
+            model=model,
+            config=training_config,
+            train_dataset=train_dataset_torch,
+            eval_dataset=eval_dataset_torch,
+            output_dir=args.output_dir,
+        )
+        
+        # Train model
+        trainer.train(
+            num_epochs=args.num_epochs,
+            eval_steps=100,
+            save_steps=500,
+        )
+    
+    # Visualize embeddings
+    print("Visualizing embeddings...")
+    
+    # Generate embeddings for a batch of data
+    model.eval()
+    device = next(model.parameters()).device
+    
+    embeddings = []
+    labels = []
+    
+    with torch.no_grad():
+        for batch in eval_dataset_torch:
+            # Move batch to device
+            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+            
+            # Forward pass
+            outputs = model(**batch)
+            
+            # Get embeddings
+            batch_embeddings = outputs["contrastive_embeddings"]
+            
+            # Get labels
+            if "labels" in batch:
+                batch_labels = batch["labels"]
+            else:
+                batch_labels = torch.zeros(batch_embeddings.shape[0])
+            
+            # Add to lists
+            embeddings.append(batch_embeddings.cpu())
+            labels.append(batch_labels.cpu())
+            
+            # Limit to 1000 embeddings
+            if len(embeddings) * batch_embeddings.shape[0] >= 1000:
+                break
+    
+    # Concatenate embeddings and labels
+    embeddings = torch.cat(embeddings, dim=0)
+    labels = torch.cat(labels, dim=0)
+    
+    # Create visualization
+    visualizer = EmbeddingVisualizer(output_dir=args.output_dir)
+    
+    # Visualize with UMAP
+    visualizer.visualize_embeddings(
+        embeddings=embeddings,
+        labels=labels,
+        method="umap",
+        title="Multimodal Embeddings",
+        filename="embeddings_umap",
+    )
+    
+    # Visualize with t-SNE
+    visualizer.visualize_embeddings(
+        embeddings=embeddings,
+        labels=labels,
+        method="tsne",
+        title="Multimodal Embeddings",
+        filename="embeddings_tsne",
+    )
+    
+    # Log visualizations to tracker
+    tracker.log_artifact(os.path.join(args.output_dir, "embeddings_umap.png"))
+    tracker.log_artifact(os.path.join(args.output_dir, "embeddings_tsne.png"))
+    
+    # Finish tracking
+    tracker.finish()
+    
+    print(f"Training completed. Model and visualizations saved to {args.output_dir}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+## Conclusion
+
+This multimodal representation learning framework provides a comprehensive solution for developing state-of-the-art embedding models that integrate text, image, audio, and video modalities. The system includes:
+
+1. **Advanced Architecture**: Transformer-based models with cross-attention mechanisms for modality fusion, built with JAX/Flax and PyTorch
+2. **Contrastive Learning**: Sophisticated contrastive objectives with hard negative mining for improved representation quality
+3. **Efficient Training**: Distributed training support with DeepSpeed for scaling to billions of parameters
+4. **Robust Data Pipeline**: TensorFlow Data pipeline that handles diverse multimodal datasets with appropriate preprocessing
+5. **Neural-Symbolic Integration**: Integration with langchain and dspy for automatic evaluation and targeted example generation
+6. **Comprehensive Evaluation**: Evaluation suites for zero-shot transfer, retrieval, and downstream task effectiveness
+7. **Model Distillation**: Knowledge distillation techniques for creating efficient deployment models
+8. **Visualization Tools**: Embedding space visualization using UMAP/t-SNE and attention map visualization
+9. **Experiment Tracking**: Full reproducibility using MLflow and Weights & Biases
+
+The codebase follows Google's Python style guide with comprehensive documentation and is designed for both research extensibility and production-level code quality.
+
