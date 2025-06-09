@@ -1,21 +1,15 @@
 import os
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-
-import numpy as np
 import tensorflow as tf
 import tensorflow_io as tfio
-import tensorflow_datasets as tfds
+import numpy as np
+from typing import Dict, List, Optional, Any, Callable
+from openmmrl.utils.logging import get_logger
 
+logger = get_logger(__name__)
 
 class OpenMMRLDatasetTF:
     """
-    TensorFlow Data pipeline for multimodal datasets.
-    
-    Handles preprocessing and loading of multimodal data from various sources:
-    - WebImageText
-    - AudioSet
-    - YouTube-8M
-    - HowTo100M
+    TensorFlow-based dataset for multimodal data loading and preprocessing.
     """
     
     def __init__(
@@ -23,307 +17,345 @@ class OpenMMRLDatasetTF:
         dataset_name: str,
         split: str = "train",
         data_dir: Optional[str] = None,
-        modalities: List[str] = ["text", "image", "audio", "video"],
-        text_processor: Optional[Callable] = None,
-        image_processor: Optional[Callable] = None,
-        audio_processor: Optional[Callable] = None,
-        video_processor: Optional[Callable] = None,
+        modalities: List[str] = ["text", "image"],
         batch_size: int = 32,
         shuffle_buffer_size: int = 10000,
+        num_parallel_calls: int = tf.data.AUTOTUNE,
         prefetch_size: int = tf.data.AUTOTUNE,
-        deterministic: bool = False,
-        cache: bool = False,
+        text_max_length: int = 512,
+        image_size: int = 224,
+        audio_sample_rate: int = 16000,
+        audio_duration: float = 10.0,
+        video_num_frames: int = 32,
     ):
-        """
-        Initialize the multimodal dataset.
-        
-        Args:
-            dataset_name: Name of the dataset to load
-            split: Data split to use ('train', 'validation', 'test')
-            data_dir: Directory containing the dataset
-            modalities: List of modalities to load
-            text_processor: Function to process text data
-            image_processor: Function to process image data
-            audio_processor: Function to process audio data
-            video_processor: Function to process video data
-            batch_size: Batch size for the dataset
-            shuffle_buffer_size: Size of the shuffle buffer
-            prefetch_size: Number of elements to prefetch
-            deterministic: Whether to use deterministic data loading
-            cache: Whether to cache the dataset
-        """
         self.dataset_name = dataset_name
         self.split = split
         self.data_dir = data_dir
         self.modalities = modalities
         self.batch_size = batch_size
         self.shuffle_buffer_size = shuffle_buffer_size
+        self.num_parallel_calls = num_parallel_calls
         self.prefetch_size = prefetch_size
-        self.deterministic = deterministic
-        self.cache = cache
+        self.text_max_length = text_max_length
+        self.image_size = image_size
+        self.audio_sample_rate = audio_sample_rate
+        self.audio_duration = audio_duration
+        self.video_num_frames = video_num_frames
         
-        # Set default processors if not provided
-        self.text_processor = text_processor or self._default_text_processor
-        self.image_processor = image_processor or self._default_image_processor
-        self.audio_processor = audio_processor or self._default_audio_processor
-        self.video_processor = video_processor or self._default_video_processor
-        
-        # Create dataset
         self.dataset = self._create_dataset()
     
-    def _create_dataset(self) -> tf.data.Dataset:
-        """Create and configure the dataset."""
+    def _create_dataset(self):
+        """Create the TensorFlow dataset."""
         # Load raw dataset
-        if self.dataset_name.lower() == "webimagetext":
+        if self.dataset_name.lower() in ["webimagetext", "wit"]:
             dataset = self._load_webimagetext()
-        elif self.dataset_name.lower() == "audioset":
-            dataset = self._load_audioset()
-        elif self.dataset_name.lower() == "youtube8m":
-            dataset = self._load_youtube8m()
-        elif self.dataset_name.lower() == "howto100m":
-            dataset = self._load_howto100m()
+        elif self.dataset_name.lower() == "coco":
+            dataset = self._load_coco()
+        elif self.dataset_name.lower() == "flickr30k":
+            dataset = self._load_flickr30k()
+        elif self.dataset_name.lower() == "conceptual_captions":
+            dataset = self._load_conceptual_captions()
         else:
-            # Try loading from TensorFlow Datasets
-            try:
-                dataset = tfds.load(
-                    self.dataset_name,
-                    split=self.split,
-                    data_dir=self.data_dir,
-                    with_info=False,
-                )
-            except:
-                raise ValueError(f"Unsupported dataset: {self.dataset_name}")
-        
-        # Apply caching if requested
-        if self.cache:
-            dataset = dataset.cache()
-        
-        # Shuffle dataset (for training)
-        if self.split == "train":
-            dataset = dataset.shuffle(
-                self.shuffle_buffer_size,
-                reshuffle_each_iteration=True,
-            )
+            # Try loading a custom dataset from data_dir
+            dataset = self._load_custom_dataset()
         
         # Apply preprocessing
         dataset = dataset.map(
             self._preprocess_example,
-            num_parallel_calls=tf.data.AUTOTUNE,
-            deterministic=self.deterministic,
+            num_parallel_calls=self.num_parallel_calls
         )
         
         # Filter invalid examples
         dataset = dataset.filter(self._is_valid_example)
         
-        # Batch dataset
+        # Shuffle if training
+        if self.split == "train" and self.shuffle_buffer_size > 0:
+            dataset = dataset.shuffle(self.shuffle_buffer_size)
+        
+        # Batch the dataset
         dataset = dataset.batch(
             self.batch_size,
-            drop_remainder=self.split == "train",
-            deterministic=self.deterministic,
+            drop_remainder=(self.split == "train")
         )
         
-        # Prefetch data
+        # Prefetch for performance
         dataset = dataset.prefetch(self.prefetch_size)
         
         return dataset
     
-    def _load_webimagetext(self) -> tf.data.Dataset:
-        """Load WebImageText dataset."""
-        # Example implementation for loading WebImageText
-        # In a real implementation, this would handle the specific format of WebImageText
-        if self.data_dir is None:
-            raise ValueError("data_dir must be specified for WebImageText")
+    def _load_webimagetext(self):
+        """Load Web Image Text dataset."""
+        if not self.data_dir:
+            raise ValueError("data_dir must be specified for WebImageText dataset")
         
-        # Example of loading from TFRecord files
-        pattern = os.path.join(self.data_dir, f"webimagetext-{self.split}*.tfrecord")
-        dataset = tf.data.TFRecordDataset(
-            tf.data.Dataset.list_files(pattern, shuffle=self.split == "train")
-        )
+        pattern = os.path.join(self.data_dir, f"wit-{self.split}*.tfrecord")
+        filenames = tf.data.Dataset.list_files(pattern, shuffle=(self.split == "train"))
+        dataset = tf.data.TFRecordDataset(filenames)
         
-        # Parse TFRecord examples
-        def _parse_example(example_proto):
-            feature_description = {
+        def parse_wit_example(example_proto):
+            features = {
                 'image/encoded': tf.io.FixedLenFeature([], tf.string),
                 'image/format': tf.io.FixedLenFeature([], tf.string),
-                'image/height': tf.io.FixedLenFeature([], tf.int64),
-                'image/width': tf.io.FixedLenFeature([], tf.int64),
                 'text': tf.io.FixedLenFeature([], tf.string),
-                'label': tf.io.FixedLenFeature([], tf.int64),
+                'label': tf.io.FixedLenFeature([], tf.int64, default_value=0),
             }
-            return tf.io.parse_single_example(example_proto, feature_description)
+            return tf.io.parse_single_example(example_proto, features)
         
-        return dataset.map(_parse_example, num_parallel_calls=tf.data.AUTOTUNE)
+        return dataset.map(parse_wit_example)
     
-    def _load_audioset(self) -> tf.data.Dataset:
-        """Load AudioSet dataset."""
-        # Example implementation for loading AudioSet
-        if self.data_dir is None:
-            raise ValueError("data_dir must be specified for AudioSet")
+    def _load_coco(self):
+        """Load COCO dataset."""
+        import tensorflow_datasets as tfds
         
-        pattern = os.path.join(self.data_dir, f"audioset-{self.split}*.tfrecord")
-        dataset = tf.data.TFRecordDataset(
-            tf.data.Dataset.list_files(pattern, shuffle=self.split == "train")
-        )
+        try:
+            dataset = tfds.load(
+                "coco_captions",
+                split=self.split,
+                data_dir=self.data_dir,
+                with_info=False
+            )
+            
+            def format_coco_example(example):
+                return {
+                    'image/encoded': tf.image.encode_jpeg(example['image']),
+                    'image/format': tf.constant('jpeg'),
+                    'text': example['captions']['text'][0],  # Take first caption
+                    'label': tf.constant(0, dtype=tf.int64),
+                }
+            
+            return dataset.map(format_coco_example)
+            
+        except Exception as e:
+            logger.error(f"Failed to load COCO dataset: {e}")
+            raise
+    
+    def _load_flickr30k(self):
+        """Load Flickr30k dataset."""
+        # This would need to be implemented based on your specific Flickr30k format
+        raise NotImplementedError("Flickr30k dataset loading not implemented")
+    
+    def _load_conceptual_captions(self):
+        """Load Conceptual Captions dataset."""
+        import tensorflow_datasets as tfds
         
-        # Parse TFRecord examples
-        def _parse_example(example_proto):
-            feature_description = {
-                'audio/encoded': tf.io.FixedLenFeature([], tf.string),
-                'audio/format': tf.io.FixedLenFeature([], tf.string),
-                'audio/sample_rate': tf.io.FixedLenFeature([], tf.int64),
-                'audio/duration_ms': tf.io.FixedLenFeature([], tf.int64),
-                'labels': tf.io.VarLenFeature(tf.int64),
+        try:
+            dataset = tfds.load(
+                "conceptual_captions",
+                split=self.split,
+                data_dir=self.data_dir,
+                with_info=False
+            )
+            
+            def format_cc_example(example):
+                return {
+                    'image/encoded': example['image'],
+                    'image/format': tf.constant('jpeg'),
+                    'text': example['caption'],
+                    'label': tf.constant(0, dtype=tf.int64),
+                }
+            
+            return dataset.map(format_cc_example)
+            
+        except Exception as e:
+            logger.error(f"Failed to load Conceptual Captions dataset: {e}")
+            raise
+    
+    def _load_custom_dataset(self):
+        """Load a custom dataset from tfrecord files."""
+        if not self.data_dir:
+            raise ValueError("data_dir must be specified for custom dataset")
+        
+        pattern = os.path.join(self.data_dir, f"{self.dataset_name}-{self.split}*.tfrecord")
+        filenames = tf.data.Dataset.list_files(pattern, shuffle=(self.split == "train"))
+        
+        if not filenames:
+            raise FileNotFoundError(f"No tfrecord files found matching pattern: {pattern}")
+        
+        dataset = tf.data.TFRecordDataset(filenames)
+        
+        def parse_custom_example(example_proto):
+            # Define a flexible feature spec
+            features = {
+                'image/encoded': tf.io.FixedLenFeature([], tf.string, default_value=''),
+                'image/format': tf.io.FixedLenFeature([], tf.string, default_value='jpeg'),
                 'text': tf.io.FixedLenFeature([], tf.string, default_value=''),
-            }
-            return tf.io.parse_single_example(example_proto, feature_description)
-        
-        return dataset.map(_parse_example, num_parallel_calls=tf.data.AUTOTUNE)
-    
-    def _load_youtube8m(self) -> tf.data.Dataset:
-        """Load YouTube-8M dataset."""
-        # Example implementation for loading YouTube-8M
-        if self.data_dir is None:
-            raise ValueError("data_dir must be specified for YouTube-8M")
-        
-        pattern = os.path.join(self.data_dir, f"youtube8m-{self.split}*.tfrecord")
-        dataset = tf.data.TFRecordDataset(
-            tf.data.Dataset.list_files(pattern, shuffle=self.split == "train")
-        )
-        
-        # Parse TFRecord examples
-        def _parse_example(example_proto):
-            feature_description = {
-                'id': tf.io.FixedLenFeature([], tf.string),
+                'audio/encoded': tf.io.FixedLenFeature([], tf.string, default_value=''),
+                'video/encoded': tf.io.FixedLenFeature([], tf.string, default_value=''),
+                'label': tf.io.FixedLenFeature([], tf.int64, default_value=0),
                 'labels': tf.io.VarLenFeature(tf.int64),
-                'mean_rgb': tf.io.FixedLenFeature([1024], tf.float32),
-                'mean_audio': tf.io.FixedLenFeature([128], tf.float32),
             }
-            return tf.io.parse_single_example(example_proto, feature_description)
+            return tf.io.parse_single_example(example_proto, features)
         
-        return dataset.map(_parse_example, num_parallel_calls=tf.data.AUTOTUNE)
+        return dataset.map(parse_custom_example)
     
-    def _load_howto100m(self) -> tf.data.Dataset:
-        """Load HowTo100M dataset."""
-        # Example implementation for loading HowTo100M
-        if self.data_dir is None:
-            raise ValueError("data_dir must be specified for HowTo100M")
-        
-        pattern = os.path.join(self.data_dir, f"howto100m-{self.split}*.tfrecord")
-        dataset = tf.data.TFRecordDataset(
-            tf.data.Dataset.list_files(pattern, shuffle=self.split == "train")
-        )
-        
-        # Parse TFRecord examples
-        def _parse_example(example_proto):
-            feature_description = {
-                'video_id': tf.io.FixedLenFeature([], tf.string),
-                'caption': tf.io.FixedLenFeature([], tf.string),
-                'start_time': tf.io.FixedLenFeature([], tf.float32),
-                'end_time': tf.io.FixedLenFeature([], tf.float32),
-                'video_features': tf.io.FixedLenFeature([512], tf.float32),
-            }
-            return tf.io.parse_single_example(example_proto, feature_description)
-        
-        return dataset.map(_parse_example, num_parallel_calls=tf.data.AUTOTUNE)
-    
-    def _default_text_processor(self, text: tf.Tensor) -> Dict[str, tf.Tensor]:
-        """Default text processor."""
-        # In a real implementation, this would use a tokenizer
-        # Here we just convert to lowercase and split by space as a simple example
-        text = tf.strings.lower(text)
-        text = tf.strings.split(text)
-        return {
-            "input_ids": text,
-            "attention_mask": tf.ones_like(text, dtype=tf.int32),
-        }
-    
-    def _default_image_processor(self, image: tf.Tensor) -> Dict[str, tf.Tensor]:
-        """Default image processor."""
-        # Decode image if needed
-        if image.dtype == tf.string:
-            image = tf.image.decode_image(image, channels=3)
-        
-        # Resize and normalize
-        image = tf.image.resize(image, [224, 224])
-        image = tf.cast(image, tf.float32) / 255.0
-        
-        return {
-            "pixel_values": image,
-        }
-    
-    def _default_audio_processor(self, audio: tf.Tensor) -> Dict[str, tf.Tensor]:
-        """Default audio processor."""
-        # Decode audio if needed
-        if audio.dtype == tf.string:
-            # Use tensorflow_io to decode audio
-            # This is a placeholder - actual implementation would depend on audio format
-            audio = tfio.audio.decode_wav(audio, desired_channels=1)
-        
-        # Convert to mel spectrogram
-        # This is a placeholder - real implementation would compute proper mel spectrograms
-        spectrogram = tf.abs(tf.signal.stft(audio, frame_length=256, frame_step=128))
-        
-        return {
-            "features": spectrogram,
-        }
-    
-    def _default_video_processor(self, video: tf.Tensor) -> Dict[str, tf.Tensor]:
-        """Default video processor."""
-        # In a real implementation, this would extract frames, apply transforms, etc.
-        # Here we just return the input as a placeholder
-        return {
-            "frames": video,
-        }
-    
-    def _preprocess_example(self, example: Dict[str, tf.Tensor]) -> Dict[str, Any]:
+    def _preprocess_example(self, example):
         """Preprocess a single example."""
         result = {}
         
-        # Process text if available and requested
+        # Process text
         if "text" in self.modalities and "text" in example:
-            result["text"] = self.text_processor(example["text"])
+            text = example["text"]
+            if tf.strings.length(text) > 0:
+                result["text"] = self._preprocess_text(text)
         
-        # Process image if available and requested
-        if "image" in self.modalities and any(k.startswith("image/") for k in example.keys()):
-            image_tensor = example.get("image/encoded", example.get("image", None))
-            if image_tensor is not None:
-                result["image"] = self.image_processor(image_tensor)
+        # Process image
+        if "image" in self.modalities and "image/encoded" in example:
+            image_encoded = example["image/encoded"]
+            if tf.strings.length(image_encoded) > 0:
+                result["images"] = self._preprocess_image(image_encoded)
         
-        # Process audio if available and requested
-        if "audio" in self.modalities and any(k.startswith("audio/") for k in example.keys()):
-            audio_tensor = example.get("audio/encoded", example.get("audio", None))
-            if audio_tensor is not None:
-                result["audio"] = self.audio_processor(audio_tensor)
+        # Process audio
+        if "audio" in self.modalities and "audio/encoded" in example:
+            audio_encoded = example["audio/encoded"]
+            if tf.strings.length(audio_encoded) > 0:
+                result["audio"] = self._preprocess_audio(audio_encoded)
         
-        # Process video if available and requested
-        if "video" in self.modalities and any(k.startswith("video/") for k in example.keys()):
-            video_tensor = example.get("video/encoded", example.get("video", None))
-            if video_tensor is not None:
-                result["video"] = self.video_processor(video_tensor)
+        # Process video
+        if "video" in self.modalities and "video/encoded" in example:
+            video_encoded = example["video/encoded"]
+            if tf.strings.length(video_encoded) > 0:
+                result["video"] = self._preprocess_video(video_encoded)
         
-        # Add labels if available
+        # Add labels
         if "label" in example:
-            result["label"] = example["label"]
-        elif "labels" in example:
-            # Convert sparse tensor to dense if needed
-            if isinstance(example["labels"], tf.sparse.SparseTensor):
-                result["labels"] = tf.sparse.to_dense(example["labels"])
-            else:
-                result["labels"] = example["labels"]
+            result["labels"] = example["label"]
+        elif "labels" in example and hasattr(example["labels"], "values"):
+            result["labels"] = tf.sparse.to_dense(example["labels"])
         
         return result
     
-    def _is_valid_example(self, example: Dict[str, Any]) -> tf.Tensor:
-        """Check if an example is valid (has required modalities)."""
-        # At least one modality must be present
-        modality_present = False
+    def _preprocess_text(self, text):
+        """Preprocess text data."""
+        # Simple tokenization (you would use a proper tokenizer in practice)
+        text = tf.strings.lower(text)
+        text = tf.strings.regex_replace(text, r'[^a-zA-Z0-9\s]', '')
+        
+        # Split into tokens
+        tokens = tf.strings.split([text]).values
+        
+        # Pad or truncate to max_length
+        tokens = tokens[:self.text_max_length]
+        tokens = tf.concat([tokens, tf.fill([self.text_max_length - tf.shape(tokens)[0]], '')], 0)
+        
+        # Convert to IDs (placeholder - use proper vocab in practice)
+        vocab_table = tf.lookup.StaticHashTable(
+            tf.lookup.KeyValueTensorInitializer(
+                keys=tf.constant([''], dtype=tf.string),
+                values=tf.constant([0], dtype=tf.int64)
+            ),
+            default_value=1
+        )
+        
+        input_ids = vocab_table.lookup(tokens)
+        attention_mask = tf.cast(tf.strings.length(tokens) > 0, tf.int32)
+        
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+        }
+    
+    def _preprocess_image(self, image_encoded):
+        """Preprocess image data."""
+        # Decode image
+        image = tf.image.decode_image(image_encoded, channels=3)
+        image = tf.cast(image, tf.float32)
+        
+        # Resize and normalize
+        image = tf.image.resize(image, [self.image_size, self.image_size])
+        image = tf.image.random_flip_left_right(image) if self.split == "train" else image
+        image = image / 255.0
+        
+        # Normalize with ImageNet stats
+        mean = tf.constant([0.485, 0.456, 0.406])
+        std = tf.constant([0.229, 0.224, 0.225])
+        image = (image - mean) / std
+        
+        return image
+    
+    def _preprocess_audio(self, audio_encoded):
+        """Preprocess audio data."""
+        # Decode audio (assuming WAV format)
+        try:
+            audio = tfio.audio.decode_wav(audio_encoded, dtype=tf.float32)
+            audio = tf.squeeze(audio, axis=-1)  # Remove channel dimension if mono
+            
+            # Resample to target sample rate if needed
+            # This is a placeholder - proper resampling would need librosa or similar
+            
+            # Pad or truncate to fixed duration
+            target_length = int(self.audio_sample_rate * self.audio_duration)
+            audio_length = tf.shape(audio)[0]
+            
+            if audio_length > target_length:
+                audio = audio[:target_length]
+            else:
+                padding = target_length - audio_length
+                audio = tf.concat([audio, tf.zeros([padding])], 0)
+            
+            # Compute mel spectrogram
+            stft = tf.signal.stft(
+                audio,
+                frame_length=1024,
+                frame_step=256,
+                fft_length=1024
+            )
+            magnitude = tf.abs(stft)
+            
+            # Convert to mel scale (simplified)
+            mel_features = tf.reduce_mean(magnitude, axis=-1)  # Placeholder
+            
+            return {
+                "features": mel_features,
+            }
+            
+        except Exception as e:
+            logger.warning(f"Failed to process audio: {e}")
+            # Return dummy features
+            target_frames = int(self.audio_sample_rate * self.audio_duration / 256)
+            return {
+                "features": tf.zeros([target_frames, 513]),
+            }
+    
+    def _preprocess_video(self, video_encoded):
+        """Preprocess video data."""
+        # This is a placeholder for video preprocessing
+        # In practice, you would decode the video and extract frames
+        try:
+            # Decode video frames (this would need ffmpeg-python or similar)
+            # For now, return dummy frames
+            dummy_frames = tf.zeros([self.video_num_frames, self.image_size, self.image_size, 3])
+            
+            return {
+                "frames": dummy_frames,
+            }
+            
+        except Exception as e:
+            logger.warning(f"Failed to process video: {e}")
+            # Return dummy frames
+            return {
+                "frames": tf.zeros([self.video_num_frames, self.image_size, self.image_size, 3]),
+            }
+    
+    def _is_valid_example(self, example):
+        """Check if an example has required modalities."""
+        has_required_modality = False
+        
         for modality in self.modalities:
-            if modality in example:
-                modality_present = True
+            if modality == "text" and "text" in example:
+                has_required_modality = True
+                break
+            elif modality == "image" and "images" in example:
+                has_required_modality = True
+                break
+            elif modality == "audio" and "audio" in example:
+                has_required_modality = True
+                break
+            elif modality == "video" and "video" in example:
+                has_required_modality = True
                 break
         
-        return modality_present
+        return has_required_modality
     
-    def get_dataset(self) -> tf.data.Dataset:
-        """Get the prepared dataset."""
+    def get_dataset(self):
+        """Get the preprocessed dataset."""
         return self.dataset 
